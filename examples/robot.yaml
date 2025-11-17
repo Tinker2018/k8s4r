@@ -1,0 +1,11 @@
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-001
+  namespace: default
+spec:
+  robotId: robot-001
+  description: "Example robot device"
+  labels:
+    location: "warehouse-a"
+    type: "mobile"

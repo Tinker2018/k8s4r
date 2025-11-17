@@ -1,0 +1,23 @@
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-002
+  namespace: default
+spec:
+  robotId: robot-002
+  description: "Second example robot"
+  labels:
+    location: "warehouse-b"
+    type: "arm"
+---
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-003
+  namespace: default
+spec:
+  robotId: robot-003
+  description: "Third example robot"
+  labels:
+    location: "warehouse-a"
+    type: "mobile"
