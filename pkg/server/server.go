@@ -14,9 +14,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,12 +28,21 @@ import (
 const (
 	// FixedToken 是用于 Agent 认证的固定 Token
 	FixedToken = "fixed-token-123"
+
+	// MQTT Topics
+	TopicRegister  = "k8s4r/register"
+	TopicHeartbeat = "k8s4r/heartbeat"
+	TopicResponse  = "k8s4r/response"
+	TopicCommands  = "k8s4r/commands"
 )
 
-// Server 是 API Server 的主结构
+// Server 是 MQTT Server 的主结构
 type Server struct {
-	Client    client.Client
-	Namespace string
+	Client     client.Client
+	Namespace  string
+	mqttClient mqtt.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // RegisterRequest 是 Agent 注册请求的结构
@@ -54,42 +63,41 @@ type HeartbeatRequest struct {
 type Response struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	RobotID string `json:"robotId,omitempty"`
 }
 
 // NewServer 创建一个新的 Server 实例
 func NewServer(client client.Client, namespace string) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		Client:    client,
 		Namespace: namespace,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
 // RegisterHandler 处理 Agent 注册请求
-func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
-	logger := log.FromContext(r.Context())
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
 
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
 		logger.Error(err, "Failed to decode register request")
-		s.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid request body")
 		return
 	}
 
 	// 验证 Token
 	if req.Token != FixedToken {
 		logger.Info("Invalid token provided", "robotId", req.RobotID)
-		s.sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid token")
 		return
 	}
 
 	// 检查 Robot 资源是否存在
 	robot := &robotv1alpha1.Robot{}
-	err := s.Client.Get(r.Context(), types.NamespacedName{
+	err := s.Client.Get(s.ctx, types.NamespacedName{
 		Name:      req.RobotID,
 		Namespace: s.Namespace,
 	}, robot)
@@ -107,9 +115,9 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		if err := s.Client.Create(r.Context(), robot); err != nil {
+		if err := s.Client.Create(s.ctx, robot); err != nil {
 			logger.Error(err, "Failed to create Robot resource", "robotId", req.RobotID)
-			s.sendErrorResponse(w, "Failed to register robot", http.StatusInternalServerError)
+			s.sendMQTTResponse(req.RobotID, false, "Failed to register robot")
 			return
 		}
 
@@ -123,49 +131,44 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	robot.Status.Message = "Agent registered successfully"
 	robot.Status.DeviceInfo = req.DeviceInfo
 
-	if err := s.Client.Status().Update(r.Context(), robot); err != nil {
+	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
 		logger.Error(err, "Failed to update Robot status", "robotId", req.RobotID)
-		s.sendErrorResponse(w, "Failed to update robot status", http.StatusInternalServerError)
+		s.sendMQTTResponse(req.RobotID, false, "Failed to update robot status")
 		return
 	}
 
 	logger.Info("Robot registered successfully", "robotId", req.RobotID)
-	s.sendSuccessResponse(w, "Robot registered successfully")
+	s.sendMQTTResponse(req.RobotID, true, "Robot registered successfully")
 }
 
 // HeartbeatHandler 处理 Agent 心跳请求
-func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
-	logger := log.FromContext(r.Context())
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
 
 	var req HeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
 		logger.Error(err, "Failed to decode heartbeat request")
-		s.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid request body")
 		return
 	}
 
 	// 验证 Token
 	if req.Token != FixedToken {
 		logger.Info("Invalid token provided", "robotId", req.RobotID)
-		s.sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid token")
 		return
 	}
 
 	// 获取 Robot 资源
 	robot := &robotv1alpha1.Robot{}
-	err := s.Client.Get(r.Context(), types.NamespacedName{
+	err := s.Client.Get(s.ctx, types.NamespacedName{
 		Name:      req.RobotID,
 		Namespace: s.Namespace,
 	}, robot)
 
 	if err != nil {
 		logger.Error(err, "Robot not found", "robotId", req.RobotID)
-		s.sendErrorResponse(w, "Robot not registered", http.StatusNotFound)
+		s.sendMQTTResponse(req.RobotID, false, "Robot not registered")
 		return
 	}
 
@@ -180,63 +183,100 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		robot.Status.DeviceInfo = req.DeviceInfo
 	}
 
-	if err := s.Client.Status().Update(r.Context(), robot); err != nil {
+	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
 		logger.Error(err, "Failed to update heartbeat", "robotId", req.RobotID)
-		s.sendErrorResponse(w, "Failed to update heartbeat", http.StatusInternalServerError)
+		s.sendMQTTResponse(req.RobotID, false, "Failed to update heartbeat")
 		return
 	}
 
 	logger.V(1).Info("Heartbeat received", "robotId", req.RobotID)
-	s.sendSuccessResponse(w, "Heartbeat accepted")
+	s.sendMQTTResponse(req.RobotID, true, "Heartbeat accepted")
 }
 
-// sendSuccessResponse 发送成功响应
-func (s *Server) sendSuccessResponse(w http.ResponseWriter, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Response{
-		Success: true,
+// sendMQTTResponse 发送MQTT响应消息
+func (s *Server) sendMQTTResponse(robotID string, success bool, message string) {
+	logger := log.FromContext(s.ctx)
+
+	response := Response{
+		Success: success,
 		Message: message,
-	})
-}
-
-// sendErrorResponse 发送错误响应
-func (s *Server) sendErrorResponse(w http.ResponseWriter, message string, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(Response{
-		Success: false,
-		Message: message,
-	})
-}
-
-// Start 启动 HTTP 服务器
-func (s *Server) Start(ctx context.Context, addr string) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/register", s.RegisterHandler)
-	mux.HandleFunc("/api/v1/heartbeat", s.HeartbeatHandler)
-
-	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		RobotID: robotID,
 	}
 
-	logger := log.FromContext(ctx)
-	logger.Info("Starting API server", "addr", addr)
+	payload, err := json.Marshal(response)
+	if err != nil {
+		logger.Error(err, "Failed to marshal response", "robotId", robotID)
+		return
+	}
 
+	// 发送到机器人专用的响应主题
+	topic := fmt.Sprintf("%s/%s", TopicResponse, robotID)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	if token.Wait() && token.Error() != nil {
+		logger.Error(token.Error(), "Failed to publish response", "robotId", robotID, "topic", topic)
+	}
+}
+
+// Start 启动 MQTT 服务器
+func (s *Server) Start(ctx context.Context, brokerURL string) error {
+	logger := log.FromContext(ctx)
+
+	// 更新内部上下文
+	s.ctx = ctx
+
+	// 配置MQTT客户端选项
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerURL)
+	opts.SetClientID(fmt.Sprintf("k8s4r-server-%d", time.Now().Unix()))
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetPingTimeout(10 * time.Second)
+	opts.SetCleanSession(true)
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
+
+	// 添加连接超时和写超时设置
+	opts.SetConnectTimeout(10 * time.Second)
+	opts.SetWriteTimeout(10 * time.Second)
+
+	// 明确指定MQTT协议版本
+	opts.SetProtocolVersion(4) // MQTT 3.1.1
+
+	// 设置连接回调
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		logger.Info("Connected to MQTT broker", "broker", brokerURL)
+
+		// 订阅注册和心跳主题
+		if token := client.Subscribe(TopicRegister, 1, s.RegisterHandler); token.Wait() && token.Error() != nil {
+			logger.Error(token.Error(), "Failed to subscribe to register topic")
+		}
+
+		if token := client.Subscribe(TopicHeartbeat, 1, s.HeartbeatHandler); token.Wait() && token.Error() != nil {
+			logger.Error(token.Error(), "Failed to subscribe to heartbeat topic")
+		}
+
+		logger.Info("Subscribed to MQTT topics successfully")
+	})
+
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		logger.Error(err, "Connection to MQTT broker lost")
+	})
+
+	// 创建MQTT客户端
+	s.mqttClient = mqtt.NewClient(opts)
+
+	// 连接到MQTT broker
+	logger.Info("Starting MQTT server", "broker", brokerURL)
+	if token := s.mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to connect to MQTT broker: %w", token.Error())
+	}
+
+	// 等待上下文取消
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error(err, "Failed to shutdown server gracefully")
-		}
+		logger.Info("Shutting down MQTT server")
+		s.mqttClient.Disconnect(250)
+		s.cancel()
 	}()
-
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
 
 	return nil
 }

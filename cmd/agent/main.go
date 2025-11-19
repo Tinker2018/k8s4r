@@ -11,17 +11,16 @@ You may obtain a copy of the License at
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
 	"github.com/hxndg/k8s4r/pkg/collector"
 )
@@ -44,27 +43,35 @@ type HeartbeatRequest struct {
 type Response struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	RobotID string `json:"robotId,omitempty"`
 }
+
+// MQTT Topics (与server保持一致)
+const (
+	TopicRegister  = "k8s4r/register"
+	TopicHeartbeat = "k8s4r/heartbeat"
+	TopicResponse  = "k8s4r/response"
+	TopicCommands  = "k8s4r/commands"
+)
 
 // Agent 结构体
 type Agent struct {
-	ServerURL         string
+	BrokerURL         string
 	Token             string
 	RobotID           string
 	HeartbeatInterval time.Duration
-	httpClient        *http.Client
+	mqttClient        mqtt.Client
+	responseChan      chan Response
 }
 
 // NewAgent 创建一个新的 Agent 实例
-func NewAgent(serverURL, token, robotID string, heartbeatInterval time.Duration) *Agent {
+func NewAgent(brokerURL, token, robotID string, heartbeatInterval time.Duration) *Agent {
 	return &Agent{
-		ServerURL:         serverURL,
+		BrokerURL:         brokerURL,
 		Token:             token,
 		RobotID:           robotID,
 		HeartbeatInterval: heartbeatInterval,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		responseChan:      make(chan Response, 10),
 	}
 }
 
@@ -79,32 +86,28 @@ func (a *Agent) Register() error {
 		DeviceInfo: deviceInfo,
 	}
 
-	body, err := json.Marshal(req)
+	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal register request: %w", err)
 	}
 
-	resp, err := a.httpClient.Post(
-		fmt.Sprintf("%s/api/v1/register", a.ServerURL),
-		"application/json",
-		bytes.NewBuffer(body),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to send register request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result Response
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
+	// 发布注册请求
+	token := a.mqttClient.Publish(TopicRegister, 1, false, payload)
+	if token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to publish register request: %w", token.Error())
 	}
 
-	if !result.Success {
-		return fmt.Errorf("registration failed: %s", result.Message)
+	// 等待响应（带超时）
+	select {
+	case response := <-a.responseChan:
+		if !response.Success {
+			return fmt.Errorf("registration failed: %s", response.Message)
+		}
+		log.Printf("Successfully registered robot: %s", a.RobotID)
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("registration timeout")
 	}
-
-	log.Printf("Successfully registered robot: %s", a.RobotID)
-	return nil
 }
 
 // SendHeartbeat 发送心跳
@@ -118,40 +121,96 @@ func (a *Agent) SendHeartbeat() error {
 		DeviceInfo: deviceInfo,
 	}
 
-	body, err := json.Marshal(req)
+	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat request: %w", err)
 	}
 
-	resp, err := a.httpClient.Post(
-		fmt.Sprintf("%s/api/v1/heartbeat", a.ServerURL),
-		"application/json",
-		bytes.NewBuffer(body),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to send heartbeat: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result Response
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("heartbeat failed: %s", result.Message)
+	// 发布心跳请求
+	token := a.mqttClient.Publish(TopicHeartbeat, 1, false, payload)
+	if token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to publish heartbeat: %w", token.Error())
 	}
 
 	log.Printf("Heartbeat sent successfully for robot: %s", a.RobotID)
 	return nil
 }
 
+// setupMQTT 设置MQTT连接
+func (a *Agent) setupMQTT() error {
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(a.BrokerURL)
+	opts.SetClientID(fmt.Sprintf("k8s4r-agent-%s", a.RobotID))
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetPingTimeout(10 * time.Second)
+	opts.SetCleanSession(true)
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
+
+	// 设置连接回调
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		log.Printf("Connected to MQTT broker: %s", a.BrokerURL)
+
+		// 订阅响应主题
+		responseTopic := fmt.Sprintf("%s/%s", TopicResponse, a.RobotID)
+		if token := client.Subscribe(responseTopic, 1, a.handleResponse); token.Wait() && token.Error() != nil {
+			log.Printf("Failed to subscribe to response topic: %v", token.Error())
+		}
+
+		// 订阅命令主题
+		commandTopic := fmt.Sprintf("%s/%s", TopicCommands, a.RobotID)
+		if token := client.Subscribe(commandTopic, 1, a.handleCommand); token.Wait() && token.Error() != nil {
+			log.Printf("Failed to subscribe to command topic: %v", token.Error())
+		}
+	})
+
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		log.Printf("Connection to MQTT broker lost: %v", err)
+	})
+
+	// 创建客户端并连接
+	a.mqttClient = mqtt.NewClient(opts)
+	if token := a.mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to connect to MQTT broker: %w", token.Error())
+	}
+
+	return nil
+}
+
+// handleResponse 处理服务器响应
+func (a *Agent) handleResponse(client mqtt.Client, msg mqtt.Message) {
+	var response Response
+	if err := json.Unmarshal(msg.Payload(), &response); err != nil {
+		log.Printf("Failed to unmarshal response: %v", err)
+		return
+	}
+
+	// 将响应发送到通道
+	select {
+	case a.responseChan <- response:
+	default:
+		log.Printf("Response channel is full, dropping response")
+	}
+}
+
+// handleCommand 处理服务器命令
+func (a *Agent) handleCommand(client mqtt.Client, msg mqtt.Message) {
+	log.Printf("Received command: %s", string(msg.Payload()))
+	// 这里可以添加具体的命令处理逻辑
+}
+
 // Run 运行 Agent
 func (a *Agent) Run() {
-	// 首先注册
 	log.Printf("Starting agent for robot: %s", a.RobotID)
-	log.Printf("Server URL: %s", a.ServerURL)
+	log.Printf("MQTT Broker: %s", a.BrokerURL)
 
+	// 设置MQTT连接
+	if err := a.setupMQTT(); err != nil {
+		log.Fatalf("Failed to setup MQTT: %v", err)
+	}
+	defer a.mqttClient.Disconnect(250)
+
+	// 首先注册
 	for {
 		if err := a.Register(); err != nil {
 			log.Printf("Failed to register: %v, retrying in 5 seconds...", err)
@@ -186,13 +245,13 @@ func (a *Agent) Run() {
 
 func main() {
 	var (
-		serverURL         string
+		brokerURL         string
 		token             string
 		robotID           string
 		heartbeatInterval int
 	)
 
-	flag.StringVar(&serverURL, "server-url", "http://localhost:8080", "The URL of the API server")
+	flag.StringVar(&brokerURL, "broker-url", "tcp://localhost:1883", "The MQTT broker URL")
 	flag.StringVar(&token, "token", "fixed-token-123", "The authentication token")
 	flag.StringVar(&robotID, "robot-id", "", "The unique ID of this robot (required)")
 	flag.IntVar(&heartbeatInterval, "heartbeat-interval", 30, "Heartbeat interval in seconds")
@@ -203,7 +262,7 @@ func main() {
 	}
 
 	agent := NewAgent(
-		serverURL,
+		brokerURL,
 		token,
 		robotID,
 		time.Duration(heartbeatInterval)*time.Second,

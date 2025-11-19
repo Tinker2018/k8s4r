@@ -65,11 +65,11 @@ spec:
         command:
         - /server
         args:
-        - --addr=:8080
+        - --broker-url=tcp://mqtt-broker:1883
         - --namespace=default
-        ports:
-        - containerPort: 8080
-          name: http
+        env:
+        - name: MQTT_BROKER_URL
+          value: "tcp://mqtt-broker:1883"
         resources:
           limits:
             cpu: 500m
@@ -78,19 +78,57 @@ spec:
             cpu: 10m
             memory: 64Mi
 ---
+# MQTT Broker Deployment (for development/testing purposes)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-broker
+  namespace: k8s4r-system
+  labels:
+    app: mqtt-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mqtt-broker
+  template:
+    metadata:
+      labels:
+        app: mqtt-broker
+    spec:
+      containers:
+      - name: mqtt-broker
+        image: eclipse-mosquitto:2.0
+        ports:
+        - containerPort: 1883
+          name: mqtt
+        - containerPort: 9001
+          name: websocket
+        resources:
+          limits:
+            cpu: 200m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: k8s4r-server
+  name: mqtt-broker
   namespace: k8s4r-system
   labels:
-    app: k8s4r-server
+    app: mqtt-broker
 spec:
   type: ClusterIP
   ports:
-  - port: 8080
-    targetPort: 8080
+  - port: 1883
+    targetPort: 1883
     protocol: TCP
-    name: http
+    name: mqtt
+  - port: 9001
+    targetPort: 9001
+    protocol: TCP
+    name: websocket
   selector:
-    app: k8s4r-server
+    app: mqtt-broker

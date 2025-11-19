@@ -50,11 +50,11 @@ run-manager: generate
 
 # 运行 server
 run-server:
-	go run ./cmd/server/main.go
+	go run ./cmd/server/main.go --broker-url=tcp://localhost:1883
 
 # 运行 agent (示例)
 run-agent:
-	go run ./cmd/agent/main.go --server-url=http://localhost:8080 --token=fixed-token-123 --robot-id=robot-001
+	go run ./cmd/agent/main.go --broker-url=tcp://localhost:1883 --token=fixed-token-123 --robot-id=robot-001
 
 # Docker 构建
 docker-build:

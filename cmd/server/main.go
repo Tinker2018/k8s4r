@@ -35,10 +35,10 @@ func init() {
 }
 
 func main() {
-	var addr string
+	var brokerURL string
 	var namespace string
 
-	flag.StringVar(&addr, "addr", ":8080", "The address to listen on for HTTP requests.")
+	flag.StringVar(&brokerURL, "broker-url", "tcp://localhost:1883", "The MQTT broker URL to connect to.")
 	flag.StringVar(&namespace, "namespace", "default", "The namespace to watch for Robot resources.")
 
 	opts := zap.Options{
@@ -62,7 +62,7 @@ func main() {
 	// 创建并启动 server
 	srv := server.NewServer(k8sClient.GetClient(), namespace)
 
-	setupLog.Info("starting API server", "address", addr, "namespace", namespace)
+	setupLog.Info("starting MQTT server", "broker", brokerURL, "namespace", namespace)
 
 	ctx := ctrl.SetupSignalHandler()
 
@@ -81,9 +81,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 启动 HTTP server
-	if err := srv.Start(ctx, addr); err != nil {
+	// 启动 MQTT server
+	if err := srv.Start(ctx, brokerURL); err != nil {
 		setupLog.Error(err, "problem running server")
 		os.Exit(1)
 	}
+
+	// 保持程序运行直到收到信号
+	<-ctx.Done()
+	setupLog.Info("shutting down server")
 }
