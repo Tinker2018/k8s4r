@@ -1,0 +1,98 @@
+# 使用 docker driver 运行容器化应用的 Task 示例
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Task
+metadata:
+  name: vision-service
+  namespace: default
+spec:
+  # 任务驱动类型：docker（运行 Docker 容器）
+  driver: docker
+  
+  # Driver 配置
+  config:
+    # Docker 镜像
+    image: "robot-vision:v2.1.0"
+    
+    # 镜像拉取策略
+    imagePullPolicy: "IfNotPresent"
+    
+    # 容器命令（可选，覆盖镜像的 ENTRYPOINT）
+    command: 
+      - "/app/vision-server"
+    
+    # 容器参数
+    args:
+      - "--model=/models/yolov8.pt"
+      - "--port=9090"
+    
+    # 环境变量
+    env:
+      MODEL_TYPE: "yolov8"
+      CUDA_VISIBLE_DEVICES: "0"
+      TF_CPP_MIN_LOG_LEVEL: "2"
+    
+    # 端口映射
+    ports:
+      - containerPort: 9090
+        hostPort: 9090
+        protocol: "tcp"
+    
+    # 挂载卷
+    volumes:
+      - hostPath: "/var/robot/models"
+        containerPath: "/models"
+        readOnly: true
+      
+      - hostPath: "/var/robot/data"
+        containerPath: "/data"
+        readOnly: false
+    
+    # 特权模式（访问硬件设备时需要）
+    privileged: false
+    
+    # 设备映射（访问 GPU 等）
+    devices:
+      - hostPath: "/dev/video0"
+        containerPath: "/dev/video0"
+  
+  # 资源需求
+  resources:
+    cpu: 1000       # 1 CPU core
+    memoryMB: 2048  # 2 GB
+    diskMB: 5120    # 5 GB
+    
+    # GPU 资源（如果需要）
+    # gpu: 1
+  
+  # 约束条件
+  constraints:
+    - attribute: "${attr.driver.docker}"
+      operator: "is_set"
+    
+    - attribute: "${attr.unique.hostname}"
+      operator: "regexp"
+      value: "robot-.*"
+  
+  # 重启策略
+  restartPolicy:
+    attempts: 5
+    interval: "30s"
+    delay: "10s"
+    mode: "delay"
+  
+  # 健康检查
+  healthCheck:
+    type: "http"
+    path: "/health"
+    port: 9090
+    interval: "15s"
+    timeout: "3s"
+    
+  # 服务发现配置（可选）
+  service:
+    name: "vision-service"
+    port: 9090
+    tags:
+      - "vision"
+      - "ml"
+      - "camera"

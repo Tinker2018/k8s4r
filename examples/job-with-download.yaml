@@ -1,0 +1,44 @@
+---
+# 示例 1: 指定 robot 执行任务，带文件下载
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: download-and-run
+  namespace: default
+spec:
+  name: download-and-run
+  
+  # 指定哪些 robot 执行任务
+  targetRobots:
+    - robot-001
+    - robot-002
+  
+  type: batch
+  
+  taskGroups:
+    - name: worker
+      count: 2  # 创建 2 个实例，会轮询分配到 robot-001 和 robot-002
+      
+      tasks:
+        - name: download-script
+          driver: exec
+          
+          # 先下载文件
+          artifacts:
+            - getterSource: "https://example.com/script.sh"
+              relativeDest: "local/script.sh"
+              getterMode: "file"
+            - getterSource: "https://example.com/data.tar.gz"
+              relativeDest: "local/data.tar.gz"
+              getterMode: "file"
+          
+          # 然后执行
+          config:
+            execConfig:
+              command: "/bin/bash"
+              args:
+                - "local/script.sh"
+          
+          env:
+            DATA_DIR: "/tmp/data"
+            LOG_LEVEL: "info"

@@ -1,0 +1,28 @@
+# 测试 Job: 执行 echo 命令
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-echo-job
+  namespace: default
+spec:
+  name: test-echo-job
+  robotSelector: {}
+  
+  type: batch
+  priority: 100
+  
+  taskGroups:
+    - name: echo-group
+      count: 1
+      
+      tasks:
+        - name: echo-task
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/echo
+              args:
+                - "Hello K8s4R! This is a test message."
+          
+          env:
+            TEST: "echo-test"

@@ -1,0 +1,42 @@
+---
+# 示例 2: 不指定 robot，自动调度
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: auto-schedule-job
+  namespace: default
+spec:
+  name: auto-schedule-job
+  
+  # 不指定 targetRobots，由 TaskController 自动调度
+  # targetRobots: []  # 可以省略
+  
+  type: service
+  
+  taskGroups:
+    - name: web-server
+      count: 3  # 3 个实例
+      
+      tasks:
+        - name: nginx
+          driver: exec
+          
+          # 可选：下载配置文件
+          artifacts:
+            - getterSource: "https://example.com/nginx.conf"
+              relativeDest: "local/nginx.conf"
+              getterMode: "file"
+          
+          config:
+            execConfig:
+              command: "/usr/sbin/nginx"
+              args:
+                - "-c"
+                - "local/nginx.conf"
+          
+          resources:
+            cpu: 500      # 500 MHz
+            memoryMB: 256 # 256 MB
+          
+          env:
+            NGINX_PORT: "8080"

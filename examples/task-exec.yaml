@@ -1,0 +1,60 @@
+# 使用 exec driver 运行原生二进制文件的 Task 示例
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Task
+metadata:
+  name: monitoring-task
+  namespace: default
+spec:
+  # 任务名称
+  name: "monitoring"
+  
+  # 任务驱动类型：exec（直接执行二进制文件）
+  driver: exec
+  
+  # Driver 配置
+  config:
+    execConfig:
+      # 要执行的命令
+      command: "/opt/robot/bin/monitor"
+      
+      # 命令参数
+      args:
+        - "--interval=5s"
+        - "--output=/var/log/monitor.log"
+  
+  # 环境变量
+  env:
+    LOG_LEVEL: "info"
+    DATA_DIR: "/var/robot/data"
+  
+  # 执行用户
+  user: "robot"
+  
+  # 资源需求
+  resources:
+    cpu: 100        # 100 millicores (0.1 CPU)
+    memoryMB: 256   # 256 MB
+    diskMB: 1024    # 1 GB
+  
+  # 制品下载（可选）
+  artifacts:
+    - source: "https://example.com/releases/monitor-v1.2.3.tar.gz"
+      destination: "/opt/robot/bin"
+      checksum: "sha256:abc123..."
+  
+  # 约束条件
+  constraints:
+    - attribute: "${attr.kernel.name}"
+      operator: "="
+      value: "linux"
+    
+    - attribute: "${attr.cpu.arch}"
+      operator: "="
+      value: "amd64"
+  
+  # 重启策略
+  restartPolicy:
+    attempts: 3
+    interval: "10s"
+    delay: "15s"
+    mode: "fail"  # fail, delay

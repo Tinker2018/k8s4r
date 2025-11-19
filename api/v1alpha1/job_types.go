@@ -1,0 +1,293 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+*/
+
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// JobSpec defines the desired state of Job
+// Job 是核心控制单元，定义了应用程序及其配置
+type JobSpec struct {
+	// Name 是 Job 的名称
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// RobotSelector 使用 label 选择目标 Robot（类似 Kubernetes nodeSelector）
+	// 例如: {"env": "production", "region": "us-west"}
+	// 只有匹配所有 label 的 Robot 才会被选中执行此 Job
+	// +optional
+	RobotSelector map[string]string `json:"robotSelector,omitempty"`
+
+	// Type 指定 Job 类型
+	// +kubebuilder:validation:Enum=service;batch;system
+	// +optional
+	Type JobType `json:"type,omitempty"`
+
+	// Priority 优先级 (0-100)
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Priority *int32 `json:"priority,omitempty"`
+
+	// TaskGroups 定义任务组列表
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	TaskGroups []TaskGroup `json:"taskGroups"`
+
+	// Meta 元数据
+	// +optional
+	Meta map[string]string `json:"meta,omitempty"`
+}
+
+// JobType 定义 Job 类型
+type JobType string
+
+const (
+	// JobTypeService 长期运行的服务
+	JobTypeService JobType = "service"
+
+	// JobTypeBatch 批处理任务
+	JobTypeBatch JobType = "batch"
+
+	// JobTypeSystem 系统级任务
+	JobTypeSystem JobType = "system"
+)
+
+// TaskGroup 定义任务组
+// 同一个 TaskGroup 中的 Task 会被调度到同一个 Robot 上
+type TaskGroup struct {
+	// Name 任务组名称
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Count 需要运行的实例数量
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	Count int32 `json:"count"`
+
+	// Tasks 任务列表
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Tasks []TaskDefinition `json:"tasks"`
+
+	// Constraints 任务组级别的约束
+	// +optional
+	Constraints []Constraint `json:"constraints,omitempty"`
+
+	// RestartPolicy 重启策略
+	// +optional
+	RestartPolicy *RestartPolicy `json:"restartPolicy,omitempty"`
+
+	// ReschedulePolicy 重新调度策略
+	// +optional
+	ReschedulePolicy *ReschedulePolicy `json:"reschedulePolicy,omitempty"`
+
+	// EphemeralDisk 临时磁盘配置
+	// +optional
+	EphemeralDisk *EphemeralDisk `json:"ephemeralDisk,omitempty"`
+
+	// Meta 元数据
+	// +optional
+	Meta map[string]string `json:"meta,omitempty"`
+}
+
+// TaskDefinition 定义 Task 模板（用于 Job 中）
+type TaskDefinition struct {
+	// Name 任务名称
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Driver 驱动程序类型
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=exec;docker;java;raw_exec
+	Driver TaskDriverType `json:"driver"`
+
+	// Config 驱动程序配置
+	// +kubebuilder:validation:Required
+	Config TaskDriverConfig `json:"config"`
+
+	// Resources 资源需求
+	// +optional
+	Resources *TaskResources `json:"resources,omitempty"`
+
+	// Env 环境变量
+	// +optional
+	Env map[string]string `json:"env,omitempty"`
+
+	// User 运行用户
+	// +optional
+	User string `json:"user,omitempty"`
+
+	// KillTimeout 终止超时
+	// +optional
+	KillTimeout *metav1.Duration `json:"killTimeout,omitempty"`
+
+	// Artifacts 需要下载的文件
+	// +optional
+	Artifacts []TaskArtifact `json:"artifacts,omitempty"`
+
+	// Templates 配置模板
+	// +optional
+	Templates []TaskTemplate `json:"templates,omitempty"`
+}
+
+// Constraint 定义约束条件
+type Constraint struct {
+	// LTarget 左目标（例如 ${attr.kernel.name}）
+	// +optional
+	LTarget string `json:"lTarget,omitempty"`
+
+	// RTarget 右目标（比较值）
+	// +optional
+	RTarget string `json:"rTarget,omitempty"`
+
+	// Operand 操作符
+	// +kubebuilder:validation:Enum==;!=;>;>=;<;<=;regexp;set_contains;version
+	// +optional
+	Operand string `json:"operand,omitempty"`
+}
+
+// RestartPolicy 重启策略
+type RestartPolicy struct {
+	// Attempts 重启尝试次数
+	// +optional
+	Attempts *int32 `json:"attempts,omitempty"`
+
+	// Interval 重启间隔时间窗口
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
+
+	// Delay 重启延迟
+	// +optional
+	Delay *metav1.Duration `json:"delay,omitempty"`
+
+	// Mode 重启模式
+	// +kubebuilder:validation:Enum=fail;delay
+	// +optional
+	Mode string `json:"mode,omitempty"`
+}
+
+// ReschedulePolicy 重新调度策略
+type ReschedulePolicy struct {
+	// Attempts 重新调度尝试次数
+	// +optional
+	Attempts *int32 `json:"attempts,omitempty"`
+
+	// Interval 时间窗口
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
+
+	// Delay 延迟
+	// +optional
+	Delay *metav1.Duration `json:"delay,omitempty"`
+
+	// DelayFunction 延迟函数
+	// +kubebuilder:validation:Enum=constant;exponential;fibonacci
+	// +optional
+	DelayFunction string `json:"delayFunction,omitempty"`
+
+	// MaxDelay 最大延迟
+	// +optional
+	MaxDelay *metav1.Duration `json:"maxDelay,omitempty"`
+
+	// Unlimited 是否无限重试
+	// +optional
+	Unlimited *bool `json:"unlimited,omitempty"`
+}
+
+// EphemeralDisk 临时磁盘配置
+type EphemeralDisk struct {
+	// Migrate 是否在重新调度时迁移数据
+	// +optional
+	Migrate *bool `json:"migrate,omitempty"`
+
+	// SizeMB 磁盘大小（MB）
+	// +optional
+	SizeMB *int32 `json:"sizeMB,omitempty"`
+
+	// Sticky 是否粘性（保留数据）
+	// +optional
+	Sticky *bool `json:"sticky,omitempty"`
+}
+
+// JobStatus defines the observed state of Job
+type JobStatus struct {
+	// Status Job 整体状态
+	// +optional
+	Status string `json:"status,omitempty"`
+
+	// StatusDescription 状态描述
+	// +optional
+	StatusDescription string `json:"statusDescription,omitempty"`
+
+	// CreateIndex 创建索引
+	// +optional
+	CreateIndex int64 `json:"createIndex,omitempty"`
+
+	// ModifyIndex 修改索引
+	// +optional
+	ModifyIndex int64 `json:"modifyIndex,omitempty"`
+
+	// TaskGroupSummary 任务组状态摘要
+	// +optional
+	TaskGroupSummary map[string]TaskGroupSummary `json:"taskGroupSummary,omitempty"`
+}
+
+// TaskGroupSummary 任务组状态摘要
+type TaskGroupSummary struct {
+	// Queued 排队中的数量
+	Queued int32 `json:"queued"`
+
+	// Complete 已完成的数量
+	Complete int32 `json:"complete"`
+
+	// Failed 失败的数量
+	Failed int32 `json:"failed"`
+
+	// Running 运行中的数量
+	Running int32 `json:"running"`
+
+	// Starting 启动中的数量
+	Starting int32 `json:"starting"`
+
+	// Lost 丢失的数量
+	Lost int32 `json:"lost"`
+}
+
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+//+kubebuilder:resource:scope=Namespaced
+//+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+//+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+//+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// Job is the Schema for the jobs API
+type Job struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   JobSpec   `json:"spec,omitempty"`
+	Status JobStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// JobList contains a list of Job
+type JobList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Job `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&Job{}, &JobList{})
+}

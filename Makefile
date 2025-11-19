@@ -6,13 +6,13 @@ CONTROLLER_GEN := $(GOBIN)/controller-gen
 
 all: build
 
-# 安装 controller-gen
+# 安装 controller-gen (使用更新的版本以兼容 Go 1.24)
 controller-gen:
-	@which controller-gen > /dev/null || (echo "Installing controller-gen..." && go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.13.0)
+	@which controller-gen > /dev/null || (echo "Installing controller-gen..." && go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
 
 # 生成 CRD manifests
 manifests: controller-gen
-	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd
+	$(CONTROLLER_GEN) crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd
 
 # 生成代码 (DeepCopy 等)
 generate: controller-gen

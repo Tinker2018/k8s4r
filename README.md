@@ -5,12 +5,15 @@
 ## ✨ 核心功能
 
 - ✅ **Robot CRD 资源** - Kubernetes 原生资源管理
+- ✅ **Job & Task 资源** - 声明式任务调度和执行
+- ✅ **Label Selector** - 类似 Kubernetes nodeSelector 的机器人选择机制
 - ✅ **MQTT 通信协议** - 支持弱网环境和实时通信
 - ✅ **Agent 注册机制** - 基于 Token 的认证
 - ✅ **心跳监控** - 自动检测离线状态（5分钟超时）
 - ✅ **设备信息采集** - CPU、内存、磁盘、网络等系统信息
 - ✅ **自动恢复** - Agent 重连后状态自动恢复
-- ✅ **实时命令下发** - 基于MQTT的双向通信
+- ✅ **实时任务下发** - 基于MQTT的任务分发和状态同步
+- ✅ **Artifact 下载** - 支持任务执行前下载文件
 
 ## 🎯 MQTT 协议优势
 
@@ -24,7 +27,28 @@
 
 ## 🚀 快速开始
 
-### 前置条件
+### 一键启动（推荐）
+
+```bash
+# 1. 启动所有组件
+./scripts/start-all.sh
+
+# 2. 等待系统就绪（约 10 秒）
+./scripts/check-status.sh
+
+# 3. 运行测试 Job
+./scripts/test-ls.sh
+
+# 4. 查看结果
+kubectl get robots
+kubectl get tasks
+```
+
+**详细调试指南:** 查看 [调试指南](docs/DEBUG_GUIDE.md)
+
+### 手动启动
+
+#### 前置条件
 
 - Kubernetes 集群 (v1.24+)
 - kubectl 命令行工具
@@ -98,6 +122,76 @@ mosquitto_sub -h localhost -p 1883 -t "k8s4r/#" -v
 # 或使用测试脚本
 ./config/mosquitto/test-mqtt.sh listen
 ```
+
+### 7. 创建和执行 Job
+
+```bash
+# 创建示例 Job（使用 label selector 选择 Robot）
+kubectl apply -f examples/job-with-selector.yaml
+
+# 查看 Job 状态
+kubectl get jobs
+
+# 查看创建的 Task
+kubectl get tasks
+
+# 查看 Task 详情
+kubectl describe task <task-name>
+```
+
+## 📖 使用示例
+
+### 示例 1: 使用 Label Selector 的 Job
+
+```yaml
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: data-processing-job
+spec:
+  # RobotSelector 类似 Kubernetes nodeSelector
+  # 只有 labels 完全匹配的 Robot 才会被选中
+  robotSelector:
+    env: production
+    region: us-west
+  
+  type: batch
+  
+  taskGroups:
+    - name: data-processor
+      count: 3  # 创建 3 个 Task 实例
+      
+      tasks:
+        - name: download-and-process
+          driver: exec
+          config:
+            command: /bin/bash
+            args: ["-c", "python3 /opt/app/process_data.py"]
+          
+          # Artifacts: 任务执行前下载文件
+          artifacts:
+            - source: https://example.com/datasets/data.csv
+              destination: /tmp/dataset.csv
+            - source: https://example.com/scripts/process.py
+              destination: /opt/app/process_data.py
+```
+
+### 示例 2: 配置 Robot Labels
+
+```yaml
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-prod-01
+spec:
+  robotId: robot-prod-01
+  # Labels 用于 Job 的 robotSelector 匹配
+  labels:
+    env: production
+    region: us-west
+    hardware: gpu
+```
+
 
 ## 📊 设备信息采集
 
@@ -269,11 +363,10 @@ mosquitto_sub -h localhost -p 1883 -t "k8s4r/#" -v
 
 ## 📁 文档目录
 
+- **[README.md](README.md)** - 项目介绍和快速开始
+- **[docs/DEBUG_GUIDE.md](docs/DEBUG_GUIDE.md)** - 详细的调试和测试指南
+- **[docs/ARCHITECTURE_DESIGN.md](docs/ARCHITECTURE_DESIGN.md)** - 系统架构设计文档
 - **[config/mosquitto/README.md](config/mosquitto/README.md)** - MQTT Broker 配置指南
-- **[config/mosquitto/ARCHITECTURE.md](config/mosquitto/ARCHITECTURE.md)** - MQTT 架构详细说明
-- **[config/mosquitto/MODE_COMPARISON.md](config/mosquitto/MODE_COMPARISON.md)** - MQTT 模式对比
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 整体系统架构
-- **[DEBUG.md](DEBUG.md)** - 调试指南
 
 ## 📂 项目结构
 
@@ -296,14 +389,20 @@ k8s4r/
 │   ├── server/                      # Server 部署配置
 │   └── mosquitto/                   # MQTT Broker 配置
 │       ├── README.md                # MQTT 配置说明
-│       ├── ARCHITECTURE.md          # MQTT 架构文档
-│       ├── MODE_COMPARISON.md       # 模式对比
 │       ├── start-mosquitto.sh       # Broker 启动脚本
 │       ├── test-mqtt.sh             # MQTT 测试工具
 │       ├── mosquitto.conf           # 开发环境配置
 │       ├── mosquitto-prod.conf      # 生产环境配置
 │       └── mosquitto-simple.conf    # 简化配置
 ├── examples/                        # 示例文件
+├── scripts/                         # 辅助脚本
+│   ├── start-all.sh                 # 一键启动所有组件
+│   ├── stop-all.sh                  # 停止所有组件
+│   ├── check-status.sh              # 检查系统状态
+│   └── test-ls.sh                   # 测试 Job 执行
+├── docs/                            # 文档
+│   ├── DEBUG_GUIDE.md               # 调试指南
+│   └── ARCHITECTURE_DESIGN.md       # 架构设计
 ├── bin/                            # 构建产物
 └── Dockerfile.*                    # Docker 构建文件
 ```

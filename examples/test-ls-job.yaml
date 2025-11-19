@@ -1,0 +1,31 @@
+# 测试 Job: 执行 ls 命令
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-ls-job
+  namespace: default
+spec:
+  name: test-ls-job
+  
+  # 空 selector 匹配所有 Online 状态的 Robot
+  robotSelector: {}
+  
+  type: batch
+  priority: 100
+  
+  taskGroups:
+    - name: ls-group
+      count: 1  # 只创建 1 个 Task 实例
+      
+      tasks:
+        - name: ls-task
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/ls
+              args:
+                - -lah
+                - /tmp
+          
+          env:
+            DEBUG: "true"

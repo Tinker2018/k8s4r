@@ -1,0 +1,630 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tasks.robot.k8s4r.io
+spec:
+  group: robot.k8s4r.io
+  names:
+    kind: Task
+    listKind: TaskList
+    plural: tasks
+    singular: task
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.driver
+      name: Driver
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.restartCount
+      name: Restarts
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Task is the Schema for the tasks API
+          Task 是 Nomad 风格的任务资源，代表最小的工作单元
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TaskSpec defines the desired state of Task
+              Task 是在机器人上执行的具体任务（类比 Pod）
+              由 Job 的 Controller 创建
+            properties:
+              artifacts:
+                description: Artifacts 需要下载的文件
+                items:
+                  description: TaskArtifact 任务工件
+                  properties:
+                    getterMode:
+                      description: GetterMode 下载模式
+                      enum:
+                      - any
+                      - file
+                      - dir
+                      type: string
+                    getterOptions:
+                      additionalProperties:
+                        type: string
+                      description: GetterOptions 下载选项
+                      type: object
+                    getterSource:
+                      description: GetterSource 下载源（支持 http, git, s3 等）
+                      type: string
+                    relativeDest:
+                      description: RelativeDest 相对目标路径
+                      type: string
+                  required:
+                  - getterSource
+                  type: object
+                type: array
+              config:
+                description: Config 是驱动程序的特定配置
+                properties:
+                  dockerConfig:
+                    description: DockerConfig 用于 docker 驱动
+                    properties:
+                      args:
+                        description: Args 命令参数
+                        items:
+                          type: string
+                        type: array
+                      command:
+                        description: Command 容器启动命令
+                        items:
+                          type: string
+                        type: array
+                      image:
+                        description: Image Docker 镜像
+                        type: string
+                      networkMode:
+                        description: NetworkMode 网络模式
+                        type: string
+                      ports:
+                        description: Ports 端口映射
+                        items:
+                          description: DockerPortMapping Docker 端口映射
+                          properties:
+                            hostIP:
+                              description: HostIP 绑定的主机IP
+                              type: string
+                            label:
+                              description: Label 端口标签
+                              type: string
+                            to:
+                              description: To 映射到的主机端口（可选）
+                              format: int32
+                              type: integer
+                            value:
+                              description: Value 端口号
+                              format: int32
+                              type: integer
+                          required:
+                          - label
+                          - value
+                          type: object
+                        type: array
+                      volumes:
+                        description: Volumes 卷挂载
+                        items:
+                          description: DockerVolumeMount Docker 卷挂载
+                          properties:
+                            readOnly:
+                              description: ReadOnly 是否只读
+                              type: boolean
+                            source:
+                              description: Source 主机源路径
+                              type: string
+                            target:
+                              description: Target 容器内目标路径
+                              type: string
+                          required:
+                          - source
+                          - target
+                          type: object
+                        type: array
+                      workDir:
+                        description: WorkDir 工作目录
+                        type: string
+                    required:
+                    - image
+                    type: object
+                  execConfig:
+                    description: ExecConfig 用于 exec 和 raw_exec 驱动
+                    properties:
+                      args:
+                        description: Args 命令参数
+                        items:
+                          type: string
+                        type: array
+                      command:
+                        description: Command 要执行的命令
+                        type: string
+                    required:
+                    - command
+                    type: object
+                  javaConfig:
+                    description: JavaConfig 用于 java 驱动
+                    properties:
+                      args:
+                        description: Args 应用程序参数
+                        items:
+                          type: string
+                        type: array
+                      class:
+                        description: Class 主类名（如果不是可执行 JAR）
+                        type: string
+                      classpath:
+                        description: ClassPath 类路径
+                        items:
+                          type: string
+                        type: array
+                      jarPath:
+                        description: JarPath JAR 文件路径
+                        type: string
+                      jvmOptions:
+                        description: JvmOptions JVM 选项
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - jarPath
+                    type: object
+                type: object
+              constraints:
+                description: Constraints 定义任务的约束条件
+                items:
+                  description: TaskConstraint 任务约束
+                  properties:
+                    ltarget:
+                      description: LTarget 约束目标（如 ${node.class}）
+                      type: string
+                    operand:
+                      description: Operand 操作符
+                      enum:
+                      - ="="
+                      - '!='
+                      - '>'
+                      - '>='
+                      - <
+                      - <=
+                      - regexp
+                      - set_contains
+                      - version
+                      type: string
+                    rtarget:
+                      description: RTarget 约束值
+                      type: string
+                  required:
+                  - ltarget
+                  - operand
+                  - rtarget
+                  type: object
+                type: array
+              driver:
+                description: Driver 指定任务驱动程序类型
+                enum:
+                - exec
+                - docker
+                - java
+                - raw_exec
+                type: string
+              env:
+                additionalProperties:
+                  type: string
+                description: Env 环境变量
+                type: object
+              jobName:
+                description: JobName 所属 Job 名称
+                type: string
+              killTimeout:
+                description: KillTimeout 指定强制终止任务的超时时间
+                type: string
+              name:
+                description: Name 是任务的名称
+                type: string
+              resources:
+                description: Resources 定义任务所需的资源
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: CPU CPU 资源请求和限制
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  disk:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Disk 磁盘空间需求
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  iops:
+                    description: IOPS 磁盘 IOPS 需求
+                    format: int64
+                    type: integer
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Memory 内存资源请求和限制
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  networks:
+                    description: Networks 网络资源需求
+                    items:
+                      description: TaskNetworkResource 网络资源定义
+                      properties:
+                        dynamicPorts:
+                          description: DynamicPorts 动态端口
+                          items:
+                            description: TaskPort 端口定义
+                            properties:
+                              label:
+                                description: Label 端口标签
+                                type: string
+                              to:
+                                description: To 映射到的端口（对于动态端口）
+                                format: int32
+                                type: integer
+                              value:
+                                description: Value 端口值（对于保留端口）
+                                format: int32
+                                type: integer
+                            required:
+                            - label
+                            type: object
+                          type: array
+                        mbits:
+                          description: MBits 网络带宽需求 (Mbps)
+                          format: int32
+                          type: integer
+                        reservedPorts:
+                          description: ReservedPorts 保留端口
+                          items:
+                            description: TaskPort 端口定义
+                            properties:
+                              label:
+                                description: Label 端口标签
+                                type: string
+                              to:
+                                description: To 映射到的端口（对于动态端口）
+                                format: int32
+                                type: integer
+                              value:
+                                description: Value 端口值（对于保留端口）
+                                format: int32
+                                type: integer
+                            required:
+                            - label
+                            type: object
+                          type: array
+                      type: object
+                    type: array
+                type: object
+              restartPolicy:
+                description: RestartPolicy 重启策略
+                properties:
+                  attempts:
+                    description: Attempts 最大重试次数
+                    format: int32
+                    type: integer
+                  delay:
+                    description: Delay 重启延迟
+                    type: string
+                  interval:
+                    description: Interval 重试间隔时间窗口
+                    type: string
+                  mode:
+                    description: Mode 重启模式
+                    enum:
+                    - fail
+                    - delay
+                    type: string
+                type: object
+              services:
+                description: Services 服务定义
+                items:
+                  description: TaskService 服务定义
+                  properties:
+                    checks:
+                      description: Checks 健康检查
+                      items:
+                        description: TaskServiceCheck 服务健康检查
+                        properties:
+                          args:
+                            description: Args 命令参数
+                            items:
+                              type: string
+                            type: array
+                          command:
+                            description: Command 检查命令（script 类型）
+                            type: string
+                          initialStatus:
+                            description: InitialStatus 初始状态
+                            enum:
+                            - critical
+                            - warning
+                            - passing
+                            type: string
+                          interval:
+                            description: Interval 检查间隔
+                            type: string
+                          name:
+                            description: Name 检查名称
+                            type: string
+                          path:
+                            description: Path HTTP 路径（http 类型）
+                            type: string
+                          portLabel:
+                            description: PortLabel 端口标签
+                            type: string
+                          protocol:
+                            description: Protocol 协议（http/https）
+                            type: string
+                          timeout:
+                            description: Timeout 检查超时
+                            type: string
+                          type:
+                            description: Type 检查类型
+                            enum:
+                            - http
+                            - tcp
+                            - script
+                            - grpc
+                            type: string
+                        required:
+                        - name
+                        - type
+                        type: object
+                      type: array
+                    name:
+                      description: Name 服务名称
+                      type: string
+                    portLabel:
+                      description: PortLabel 端口标签
+                      type: string
+                    tags:
+                      description: Tags 服务标签
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - name
+                  - portLabel
+                  type: object
+                type: array
+              targetRobot:
+                description: TargetRobot 目标执行的机器人（由 Controller 调度分配）
+                type: string
+              taskGroupName:
+                description: TaskGroupName 所属 TaskGroup 名称
+                type: string
+              templates:
+                description: Templates 配置模板
+                items:
+                  description: TaskTemplate 配置模板
+                  properties:
+                    changeMode:
+                      description: ChangeMode 变更模式
+                      enum:
+                      - restart
+                      - noop
+                      - signal
+                      type: string
+                    changeSignal:
+                      description: ChangeSignal 变更信号
+                      type: string
+                    destPath:
+                      description: DestPath 目标文件路径
+                      type: string
+                    embeddedTmpl:
+                      description: EmbeddedTmpl 内嵌模板内容
+                      type: string
+                    leftDelim:
+                      description: LeftDelim 左分隔符
+                      type: string
+                    perms:
+                      description: Perms 文件权限
+                      type: string
+                    rightDelim:
+                      description: RightDelim 右分隔符
+                      type: string
+                    sourcePath:
+                      description: SourcePath 模板源路径
+                      type: string
+                  required:
+                  - destPath
+                  type: object
+                type: array
+              user:
+                description: User 指定运行任务的用户
+                type: string
+            required:
+            - config
+            - driver
+            - name
+            type: object
+          status:
+            description: TaskStatus defines the observed state of Task
+            properties:
+              allocatedResources:
+                description: AllocatedResources 分配的资源
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: CPU 分配的 CPU
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  disk:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Disk 分配的磁盘
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Memory 分配的内存
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  networks:
+                    description: Networks 分配的网络资源
+                    items:
+                      description: TaskAllocatedNetworkResource 已分配的网络资源
+                      properties:
+                        dynamicPorts:
+                          description: DynamicPorts 动态端口
+                          items:
+                            description: TaskAllocatedPort 已分配的端口
+                            properties:
+                              hostIP:
+                                description: HostIP 主机IP
+                                type: string
+                              label:
+                                description: Label 端口标签
+                                type: string
+                              to:
+                                description: To 映射端口
+                                format: int32
+                                type: integer
+                              value:
+                                description: Value 端口值
+                                format: int32
+                                type: integer
+                            required:
+                            - label
+                            - value
+                            type: object
+                          type: array
+                        interface:
+                          description: Interface 网络接口
+                          type: string
+                        ip:
+                          description: IP 分配的IP地址
+                          type: string
+                        reservedPorts:
+                          description: ReservedPorts 保留端口
+                          items:
+                            description: TaskAllocatedPort 已分配的端口
+                            properties:
+                              hostIP:
+                                description: HostIP 主机IP
+                                type: string
+                              label:
+                                description: Label 端口标签
+                                type: string
+                              to:
+                                description: To 映射端口
+                                format: int32
+                                type: integer
+                              value:
+                                description: Value 端口值
+                                format: int32
+                                type: integer
+                            required:
+                            - label
+                            - value
+                            type: object
+                          type: array
+                      required:
+                      - interface
+                      - ip
+                      type: object
+                    type: array
+                type: object
+              events:
+                description: Events 任务事件列表
+                items:
+                  description: TaskEvent 任务事件
+                  properties:
+                    details:
+                      additionalProperties:
+                        type: string
+                      description: Details 事件详情
+                      type: object
+                    displayMessage:
+                      description: DisplayMessage 显示消息
+                      type: string
+                    time:
+                      description: Time 事件时间
+                      format: date-time
+                      type: string
+                    type:
+                      description: Type 事件类型
+                      type: string
+                  required:
+                  - time
+                  - type
+                  type: object
+                type: array
+              exitCode:
+                description: ExitCode 退出码
+                format: int32
+                type: integer
+              finishedAt:
+                description: FinishedAt 任务结束时间
+                format: date-time
+                type: string
+              lastRestartTime:
+                description: LastRestartTime 最后重启时间
+                format: date-time
+                type: string
+              message:
+                description: Message 状态描述信息
+                type: string
+              reason:
+                description: Reason 状态原因
+                type: string
+              restartCount:
+                description: RestartCount 重启次数
+                format: int32
+                type: integer
+              signal:
+                description: Signal 接收到的信号
+                format: int32
+                type: integer
+              startedAt:
+                description: StartedAt 任务开始时间
+                format: date-time
+                type: string
+              state:
+                description: State 任务当前状态
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

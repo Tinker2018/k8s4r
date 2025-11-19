@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndg/k8s4r/pkg/agent"
 	"github.com/hxndg/k8s4r/pkg/collector"
 )
 
@@ -219,6 +221,16 @@ func (a *Agent) Run() {
 		}
 		break
 	}
+
+	// 创建并启动 TaskExecutor
+	ctx := context.Background()
+	taskExecutor := agent.NewTaskExecutor(a.RobotID, a.mqttClient, nil)
+	if err := taskExecutor.Start(ctx); err != nil {
+		log.Fatalf("Failed to start task executor: %v", err)
+	}
+	defer taskExecutor.Stop(ctx)
+
+	log.Printf("Task executor started successfully")
 
 	// 启动心跳循环
 	ticker := time.NewTicker(a.HeartbeatInterval)

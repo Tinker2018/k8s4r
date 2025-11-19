@@ -1,0 +1,521 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+*/
+
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+)
+
+const (
+	// FixedToken 是用于 Agent 认证的固定 Token
+	FixedToken = "fixed-token-123"
+
+	// MQTT Topics
+	TopicRegister  = "k8s4r/register"
+	TopicHeartbeat = "k8s4r/heartbeat"
+	TopicResponse  = "k8s4r/response"
+	TopicCommands  = "k8s4r/commands"
+	
+	// Task 相关 Topics
+	TopicTaskDispatch = "robots/%s/tasks/dispatch"      // robots/{robotName}/tasks/dispatch
+	TopicTaskStatus   = "robots/+/tasks/+/status"       // robots/{robotName}/tasks/{taskUID}/status
+)
+
+// Server 是 MQTT Server 的主结构
+type Server struct {
+	Client     client.Client
+	Namespace  string
+	mqttClient mqtt.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+// RegisterRequest 是 Agent 注册请求的结构
+type RegisterRequest struct {
+	RobotID    string                    `json:"robotId"`
+	Token      string                    `json:"token"`
+	DeviceInfo *robotv1alpha1.DeviceInfo `json:"deviceInfo,omitempty"`
+}
+
+// HeartbeatRequest 是 Agent 心跳请求的结构
+type HeartbeatRequest struct {
+	RobotID    string                    `json:"robotId"`
+	Token      string                    `json:"token"`
+	DeviceInfo *robotv1alpha1.DeviceInfo `json:"deviceInfo,omitempty"`
+}
+
+// Response 是通用响应结构
+type Response struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	RobotID string `json:"robotId,omitempty"`
+}
+
+// TaskMessage MQTT 任务消息（从 K8s 分发到 Agent）
+type TaskMessage struct {
+	Action string              `json:"action"` // create, delete
+	Task   *robotv1alpha1.Task `json:"task"`
+}
+
+// TaskStatusMessage MQTT 任务状态上报消息（从 Agent 到 K8s）
+type TaskStatusMessage struct {
+	TaskUID   string    `json:"taskUid"`
+	RobotName string    `json:"robotName"`
+	State     string    `json:"state"`
+	ExitCode  int       `json:"exitCode"`
+	Message   string    `json:"message"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// NewServer 创建一个新的 Server 实例
+func NewServer(client client.Client, namespace string) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Server{
+		Client:    client,
+		Namespace: namespace,
+		ctx:       ctx,
+		cancel:    cancel,
+	}
+}
+
+// RegisterHandler 处理 Agent 注册请求
+func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
+
+	var req RegisterRequest
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
+		logger.Error(err, "Failed to decode register request")
+		s.sendMQTTResponse(req.RobotID, false, "Invalid request body")
+		return
+	}
+
+	// 验证 Token
+	if req.Token != FixedToken {
+		logger.Info("Invalid token provided", "robotId", req.RobotID)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid token")
+		return
+	}
+
+	// 检查 Robot 资源是否存在
+	robot := &robotv1alpha1.Robot{}
+	err := s.Client.Get(s.ctx, types.NamespacedName{
+		Name:      req.RobotID,
+		Namespace: s.Namespace,
+	}, robot)
+
+	if err != nil {
+		// Robot 不存在，创建新的 Robot 资源
+		robot = &robotv1alpha1.Robot{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      req.RobotID,
+				Namespace: s.Namespace,
+			},
+			Spec: robotv1alpha1.RobotSpec{
+				RobotID:     req.RobotID,
+				Description: "Registered by agent",
+			},
+		}
+
+		if err := s.Client.Create(s.ctx, robot); err != nil {
+			logger.Error(err, "Failed to create Robot resource", "robotId", req.RobotID)
+			s.sendMQTTResponse(req.RobotID, false, "Failed to register robot")
+			return
+		}
+
+		logger.Info("Created new Robot resource", "robotId", req.RobotID)
+	}
+
+	// 更新状态
+	now := metav1.Now()
+	robot.Status.Phase = robotv1alpha1.RobotPhaseOnline
+	robot.Status.LastHeartbeatTime = &now
+	robot.Status.Message = "Agent registered successfully"
+	robot.Status.DeviceInfo = req.DeviceInfo
+
+	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
+		logger.Error(err, "Failed to update Robot status", "robotId", req.RobotID)
+		s.sendMQTTResponse(req.RobotID, false, "Failed to update robot status")
+		return
+	}
+
+	logger.Info("Robot registered successfully", "robotId", req.RobotID)
+	s.sendMQTTResponse(req.RobotID, true, "Robot registered successfully")
+}
+
+// HeartbeatHandler 处理 Agent 心跳请求
+func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
+
+	var req HeartbeatRequest
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
+		logger.Error(err, "Failed to decode heartbeat request")
+		s.sendMQTTResponse(req.RobotID, false, "Invalid request body")
+		return
+	}
+
+	// 验证 Token
+	if req.Token != FixedToken {
+		logger.Info("Invalid token provided", "robotId", req.RobotID)
+		s.sendMQTTResponse(req.RobotID, false, "Invalid token")
+		return
+	}
+
+	// 获取 Robot 资源
+	robot := &robotv1alpha1.Robot{}
+	err := s.Client.Get(s.ctx, types.NamespacedName{
+		Name:      req.RobotID,
+		Namespace: s.Namespace,
+	}, robot)
+
+	if err != nil {
+		logger.Error(err, "Robot not found", "robotId", req.RobotID)
+		s.sendMQTTResponse(req.RobotID, false, "Robot not registered")
+		return
+	}
+
+	// 更新心跳时间和设备信息
+	now := metav1.Now()
+	robot.Status.LastHeartbeatTime = &now
+	robot.Status.Phase = robotv1alpha1.RobotPhaseOnline
+	robot.Status.Message = "Heartbeat received"
+
+	// 如果提供了设备信息，则更新
+	if req.DeviceInfo != nil {
+		robot.Status.DeviceInfo = req.DeviceInfo
+	}
+
+	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
+		logger.Error(err, "Failed to update heartbeat", "robotId", req.RobotID)
+		s.sendMQTTResponse(req.RobotID, false, "Failed to update heartbeat")
+		return
+	}
+
+	logger.V(1).Info("Heartbeat received", "robotId", req.RobotID)
+	s.sendMQTTResponse(req.RobotID, true, "Heartbeat accepted")
+}
+
+// sendMQTTResponse 发送MQTT响应消息
+func (s *Server) sendMQTTResponse(robotID string, success bool, message string) {
+	logger := log.FromContext(s.ctx)
+
+	response := Response{
+		Success: success,
+		Message: message,
+		RobotID: robotID,
+	}
+
+	payload, err := json.Marshal(response)
+	if err != nil {
+		logger.Error(err, "Failed to marshal response", "robotId", robotID)
+		return
+	}
+
+	// 发送到机器人专用的响应主题
+	topic := fmt.Sprintf("%s/%s", TopicResponse, robotID)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	if token.Wait() && token.Error() != nil {
+		logger.Error(token.Error(), "Failed to publish response", "robotId", robotID, "topic", topic)
+	}
+}
+
+// Start 启动 MQTT 服务器
+func (s *Server) Start(ctx context.Context, brokerURL string) error {
+	logger := log.FromContext(ctx)
+
+	// 更新内部上下文
+	s.ctx = ctx
+
+	// 配置MQTT客户端选项
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerURL)
+	opts.SetClientID(fmt.Sprintf("k8s4r-server-%d", time.Now().Unix()))
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetPingTimeout(10 * time.Second)
+	opts.SetCleanSession(true)
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
+
+	// 添加连接超时和写超时设置
+	opts.SetConnectTimeout(10 * time.Second)
+	opts.SetWriteTimeout(10 * time.Second)
+
+	// 明确指定MQTT协议版本
+	opts.SetProtocolVersion(4) // MQTT 3.1.1
+
+	// 设置连接回调
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		logger.Info("Connected to MQTT broker", "broker", brokerURL)
+
+		// 订阅注册和心跳主题
+		if token := client.Subscribe(TopicRegister, 1, s.RegisterHandler); token.Wait() && token.Error() != nil {
+			logger.Error(token.Error(), "Failed to subscribe to register topic")
+		}
+
+		if token := client.Subscribe(TopicHeartbeat, 1, s.HeartbeatHandler); token.Wait() && token.Error() != nil {
+			logger.Error(token.Error(), "Failed to subscribe to heartbeat topic")
+		}
+
+		// 订阅任务状态上报主题
+		if token := client.Subscribe(TopicTaskStatus, 1, s.TaskStatusHandler); token.Wait() && token.Error() != nil {
+			logger.Error(token.Error(), "Failed to subscribe to task status topic")
+		}
+
+		logger.Info("Subscribed to MQTT topics successfully")
+	})
+
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		logger.Error(err, "Connection to MQTT broker lost")
+	})
+
+	// 创建MQTT客户端
+	s.mqttClient = mqtt.NewClient(opts)
+
+	// 连接到MQTT broker
+	logger.Info("Starting MQTT server", "broker", brokerURL)
+	if token := s.mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to connect to MQTT broker: %w", token.Error())
+	}
+
+	// 等待上下文取消
+	go func() {
+		<-ctx.Done()
+		logger.Info("Shutting down MQTT server")
+		s.mqttClient.Disconnect(250)
+		s.cancel()
+	}()
+
+	return nil
+}
+
+// TaskStatusHandler 处理 Agent 任务状态上报
+func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
+
+	var statusMsg TaskStatusMessage
+	if err := json.Unmarshal(msg.Payload(), &statusMsg); err != nil {
+		logger.Error(err, "Failed to decode task status message")
+		return
+	}
+
+	logger.Info("Received task status update",
+		"taskUid", statusMsg.TaskUID,
+		"robotName", statusMsg.RobotName,
+		"state", statusMsg.State,
+		"exitCode", statusMsg.ExitCode)
+
+	// 查找对应的 Task 并更新状态
+	taskList := &robotv1alpha1.TaskList{}
+	if err := s.Client.List(s.ctx, taskList); err != nil {
+		logger.Error(err, "Failed to list tasks")
+		return
+	}
+
+	var task *robotv1alpha1.Task
+	for i := range taskList.Items {
+		t := &taskList.Items[i]
+		if string(t.UID) == statusMsg.TaskUID {
+			task = t
+			break
+		}
+	}
+
+	if task == nil {
+		logger.Error(nil, "Task not found", "taskUid", statusMsg.TaskUID)
+		return
+	}
+
+	// 更新 Task 状态
+	task.Status.State = robotv1alpha1.TaskState(statusMsg.State)
+	task.Status.Message = statusMsg.Message
+	exitCode := int32(statusMsg.ExitCode)
+	task.Status.ExitCode = &exitCode
+
+	if err := s.Client.Status().Update(s.ctx, task); err != nil {
+		logger.Error(err, "Failed to update task status", "task", task.Name)
+		return
+	}
+
+	logger.Info("Task status updated successfully",
+		"task", task.Name,
+		"state", statusMsg.State,
+		"exitCode", statusMsg.ExitCode)
+}
+
+// StartTaskWatcher 启动 Task 监听器，将 Task 变化通过 MQTT 分发到 Agent
+func (s *Server) StartTaskWatcher(ctx context.Context) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Starting Task watcher")
+
+	// 使用 informer 监听 Task 变化
+	// 这里简化实现，定期轮询 Task 变化
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		processedTasks := make(map[string]bool)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				taskList := &robotv1alpha1.TaskList{}
+				if err := s.Client.List(ctx, taskList); err != nil {
+					logger.Error(err, "Failed to list tasks")
+					continue
+				}
+
+				for i := range taskList.Items {
+					task := &taskList.Items[i]
+					taskKey := string(task.UID)
+
+					// 如果任务已处理过，跳过
+					if processedTasks[taskKey] {
+						continue
+					}
+
+					// 如果任务状态是 Pending，需要分发
+					if task.Status.State == robotv1alpha1.TaskStatePending || task.Status.State == "" {
+						if err := s.dispatchTask(ctx, task); err != nil {
+							logger.Error(err, "Failed to dispatch task", "task", task.Name)
+						} else {
+							processedTasks[taskKey] = true
+						}
+					}
+
+					// 如果任务被删除，发送删除消息
+					if task.DeletionTimestamp != nil && !processedTasks[taskKey+"-delete"] {
+						if err := s.deleteTask(ctx, task); err != nil {
+							logger.Error(err, "Failed to send delete task message", "task", task.Name)
+						} else {
+							processedTasks[taskKey+"-delete"] = true
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// dispatchTask 分发任务到指定的 Robot
+func (s *Server) dispatchTask(ctx context.Context, task *robotv1alpha1.Task) error {
+	logger := log.FromContext(ctx)
+
+	// 获取目标 Robot
+	targetRobot := task.Annotations["k8s4r.io/target-robot"]
+	if targetRobot == "" {
+		// 选择第一个 Online 的 Robot
+		robotList := &robotv1alpha1.RobotList{}
+		if err := s.Client.List(ctx, robotList); err != nil {
+			return fmt.Errorf("failed to list robots: %w", err)
+		}
+
+		for i := range robotList.Items {
+			robot := &robotList.Items[i]
+			if robot.Status.Phase == robotv1alpha1.RobotPhaseOnline {
+				targetRobot = robot.Name
+				
+				// 更新 Task annotation
+				if task.Annotations == nil {
+					task.Annotations = make(map[string]string)
+				}
+				task.Annotations["k8s4r.io/target-robot"] = targetRobot
+				if err := s.Client.Update(ctx, task); err != nil {
+					logger.Error(err, "Failed to update task annotation")
+				}
+				break
+			}
+		}
+
+		if targetRobot == "" {
+			return fmt.Errorf("no online robot available")
+		}
+	}
+
+	// 构造 MQTT 消息
+	msg := TaskMessage{
+		Action: "create",
+		Task:   task,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task message: %w", err)
+	}
+
+	// 发送到指定 Robot 的任务分发 topic
+	topic := fmt.Sprintf(TopicTaskDispatch, targetRobot)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	token.Wait()
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("failed to publish task: %w", err)
+	}
+
+	logger.Info("Task dispatched to robot",
+		"task", task.Name,
+		"robot", targetRobot,
+		"topic", topic)
+
+	// 更新 Task 状态为 Running
+	task.Status.State = robotv1alpha1.TaskStateRunning
+	task.Status.Message = fmt.Sprintf("Task dispatched to robot %s", targetRobot)
+	if err := s.Client.Status().Update(ctx, task); err != nil {
+		logger.Error(err, "Failed to update task status")
+	}
+
+	return nil
+}
+
+// deleteTask 发送删除任务消息
+func (s *Server) deleteTask(ctx context.Context, task *robotv1alpha1.Task) error {
+	logger := log.FromContext(ctx)
+
+	targetRobot := task.Annotations["k8s4r.io/target-robot"]
+	if targetRobot == "" {
+		return nil // 任务还没分发，无需删除
+	}
+
+	msg := TaskMessage{
+		Action: "delete",
+		Task:   task,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal delete task message: %w", err)
+	}
+
+	topic := fmt.Sprintf(TopicTaskDispatch, targetRobot)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	token.Wait()
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("failed to publish delete task: %w", err)
+	}
+
+	logger.Info("Delete task message sent",
+		"task", task.Name,
+		"robot", targetRobot)
+
+	return nil
+}

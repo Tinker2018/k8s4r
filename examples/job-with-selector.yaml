@@ -1,0 +1,99 @@
+# 示例：使用 RobotSelector 的 Job
+# 这个 Job 会选择所有 labels 匹配 {"env": "production", "region": "us-west"} 的 Robot
+---
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: data-processing-job
+  namespace: default
+spec:
+  name: data-processing-job
+  
+  # RobotSelector 类似 Kubernetes nodeSelector
+  # 只有 labels 完全匹配的 Robot 才会被选中
+  robotSelector:
+    env: production
+    region: us-west
+  
+  type: batch
+  priority: 50
+  
+  taskGroups:
+    - name: data-processor
+      count: 3  # 创建 3 个 Task 实例，轮询分配到匹配的 Robot
+      
+      tasks:
+        - name: download-and-process
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Starting data processing on $(hostname)"
+                  # 下载的文件会在 artifacts 指定的位置
+                  python3 /opt/app/process_data.py --input /tmp/dataset.csv
+          
+          # Artifacts: 在执行前下载文件
+          artifacts:
+            - getterSource: https://example.com/datasets/data-2024.csv
+              relativeDest: /tmp/dataset.csv
+            - getterSource: https://example.com/scripts/process_data.py
+              relativeDest: /opt/app/process_data.py
+          
+          env:
+            LOG_LEVEL: info
+            REGION: us-west
+          
+          resources:
+            cpu: 2
+            memoryMB: 4096
+
+---
+# 匹配的 Robot 示例
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-prod-01
+  namespace: default
+spec:
+  robotId: robot-prod-01
+  # 这些 labels 匹配上面的 robotSelector
+  labels:
+    env: production
+    region: us-west
+    hardware: gpu
+status:
+  phase: Online
+
+---
+# 另一个匹配的 Robot
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-prod-02
+  namespace: default
+spec:
+  robotId: robot-prod-02
+  labels:
+    env: production
+    region: us-west
+    hardware: cpu
+status:
+  phase: Online
+
+---
+# 不匹配的 Robot（region 不同）
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-dev-01
+  namespace: default
+spec:
+  robotId: robot-dev-01
+  labels:
+    env: production
+    region: us-east  # region 不匹配
+status:
+  phase: Online

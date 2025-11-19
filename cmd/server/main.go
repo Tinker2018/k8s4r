@@ -87,6 +87,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 启动 Task 监听器
+	if err := srv.StartTaskWatcher(ctx); err != nil {
+		setupLog.Error(err, "problem starting task watcher")
+		os.Exit(1)
+	}
+
+	setupLog.Info("server started successfully")
+
 	// 保持程序运行直到收到信号
 	<-ctx.Done()
 	setupLog.Info("shutting down server")

@@ -1,0 +1,28 @@
+# 简单的 ls 命令 Task 示例
+# 用于测试整个 Task 系统的端到端流程
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Task
+metadata:
+  name: list-files
+  namespace: default
+spec:
+  # 任务名称
+  name: "list-files"
+  
+  # 使用 exec 驱动
+  driver: exec
+  
+  # Driver 配置
+  config:
+    execConfig:
+      # 执行 ls 命令列出当前目录
+      command: "/bin/ls"
+      
+      # 参数：长格式显示，人类可读，显示所有文件
+      args:
+        - "-lah"
+        - "/tmp"
+  
+  # 环境变量（可选）
+  env:
+    LANG: "en_US.UTF-8"

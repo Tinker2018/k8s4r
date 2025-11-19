@@ -30,8 +30,8 @@ type RobotReconciler struct {
 }
 
 const (
-	// HeartbeatTimeout 定义心跳超时时间（5分钟）
-	HeartbeatTimeout = 5 * time.Minute
+	// HeartbeatTimeout 定义心跳超时时间（30秒）
+	HeartbeatTimeout = 30 * time.Second
 )
 
 // +kubebuilder:rbac:groups=robot.k8s4r.io,resources=robots,verbs=get;list;watch;create;update;patch;delete
@@ -66,13 +66,26 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// 检查心跳超时
+	// 检查心跳并更新状态
 	if robot.Status.LastHeartbeatTime != nil {
 		timeSinceLastHeartbeat := time.Since(robot.Status.LastHeartbeatTime.Time)
 
-		if timeSinceLastHeartbeat > HeartbeatTimeout {
-			// 心跳超时，标记为离线
-			if robot.Status.Phase != robotv1alpha1.RobotPhaseOffline {
+		// 如果心跳间隔小于 30 秒，认为在线
+		if timeSinceLastHeartbeat <= HeartbeatTimeout {
+			// Pending 状态且心跳正常 → Online
+			if robot.Status.Phase == robotv1alpha1.RobotPhasePending {
+				robot.Status.Phase = robotv1alpha1.RobotPhaseOnline
+				robot.Status.Message = "Robot is online"
+
+				if err := r.Status().Update(ctx, robot); err != nil {
+					logger.Error(err, "Failed to update Robot status to Online")
+					return ctrl.Result{}, err
+				}
+				logger.Info("Robot approved and online", "robotId", robot.Spec.RobotID)
+			}
+		} else {
+			// 心跳间隔大于 30 秒 → Offline
+			if robot.Status.Phase == robotv1alpha1.RobotPhaseOnline {
 				robot.Status.Phase = robotv1alpha1.RobotPhaseOffline
 				robot.Status.Message = "Heartbeat timeout"
 
@@ -80,18 +93,8 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 					logger.Error(err, "Failed to update Robot status to Offline")
 					return ctrl.Result{}, err
 				}
-				logger.Info("Robot marked as offline due to heartbeat timeout", "robotId", robot.Spec.RobotID)
+				logger.Info("Robot marked as offline due to heartbeat timeout", "robotId", robot.Spec.RobotID, "timeSinceHeartbeat", timeSinceLastHeartbeat)
 			}
-		} else if robot.Status.Phase == robotv1alpha1.RobotPhaseOffline {
-			// 如果之前是离线状态，但收到了心跳，恢复为在线
-			robot.Status.Phase = robotv1alpha1.RobotPhaseOnline
-			robot.Status.Message = "Robot is online"
-
-			if err := r.Status().Update(ctx, robot); err != nil {
-				logger.Error(err, "Failed to update Robot status to Online")
-				return ctrl.Result{}, err
-			}
-			logger.Info("Robot recovered to online", "robotId", robot.Spec.RobotID)
 		}
 	}
 
