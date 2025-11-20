@@ -1,11 +1,14 @@
 package driver
 
 import (
-"context"
-"time"
+	"context"
+	"time"
 
-robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
 )
+
+// EventCallback 事件回调函数，用于 Driver 向上层报告执行阶段
+type EventCallback func(taskUID, event, message string)
 
 // TaskDriver 定义任务驱动接口
 type TaskDriver interface {
@@ -23,9 +26,10 @@ type TaskDriver interface {
 
 	// Destroy 销毁任务（清理资源）
 	Destroy(ctx context.Context, handle *TaskHandle) error
-}
 
-// TaskHandle 代表一个运行中的任务实例
+	// SetEventCallback 设置事件回调（可选）
+	SetEventCallback(callback EventCallback)
+} // TaskHandle 代表一个运行中的任务实例
 type TaskHandle struct {
 	TaskID     string
 	DriverName string
@@ -49,11 +53,11 @@ type TaskStatus struct {
 type TaskState string
 
 const (
-TaskStateUnknown TaskState = "unknown"
-TaskStatePending TaskState = "pending"
-TaskStateRunning TaskState = "running"
-TaskStateExited  TaskState = "exited"
-TaskStateFailed  TaskState = "failed"
+	TaskStateUnknown TaskState = "unknown"
+	TaskStatePending TaskState = "pending"
+	TaskStateRunning TaskState = "running"
+	TaskStateExited  TaskState = "exited"
+	TaskStateFailed  TaskState = "failed"
 )
 
 // ResourceUsage 资源使用情况

@@ -62,17 +62,19 @@ type Agent struct {
 	Token             string
 	RobotID           string
 	HeartbeatInterval time.Duration
+	WorkDir           string
 	mqttClient        mqtt.Client
 	responseChan      chan Response
 }
 
 // NewAgent 创建一个新的 Agent 实例
-func NewAgent(brokerURL, token, robotID string, heartbeatInterval time.Duration) *Agent {
+func NewAgent(brokerURL, token, robotID string, heartbeatInterval time.Duration, workDir string) *Agent {
 	return &Agent{
 		BrokerURL:         brokerURL,
 		Token:             token,
 		RobotID:           robotID,
 		HeartbeatInterval: heartbeatInterval,
+		WorkDir:           workDir,
 		responseChan:      make(chan Response, 10),
 	}
 }
@@ -224,7 +226,7 @@ func (a *Agent) Run() {
 
 	// 创建并启动 TaskExecutor
 	ctx := context.Background()
-	taskExecutor := agent.NewTaskExecutor(a.RobotID, a.mqttClient, nil)
+	taskExecutor := agent.NewTaskExecutor(a.RobotID, a.mqttClient, a.WorkDir, nil)
 	if err := taskExecutor.Start(ctx); err != nil {
 		log.Fatalf("Failed to start task executor: %v", err)
 	}
@@ -261,16 +263,27 @@ func main() {
 		token             string
 		robotID           string
 		heartbeatInterval int
+		workDir           string
 	)
 
 	flag.StringVar(&brokerURL, "broker-url", "tcp://localhost:1883", "The MQTT broker URL")
 	flag.StringVar(&token, "token", "fixed-token-123", "The authentication token")
 	flag.StringVar(&robotID, "robot-id", "", "The unique ID of this robot (required)")
 	flag.IntVar(&heartbeatInterval, "heartbeat-interval", 30, "Heartbeat interval in seconds")
+	flag.StringVar(&workDir, "work-dir", "", "Working directory for tasks (default: $HOME/.k8s4r/tasks)")
 	flag.Parse()
 
 	if robotID == "" {
 		log.Fatal("robot-id is required")
+	}
+
+	// 如果未指定工作目录，使用用户主目录
+	if workDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("Failed to get user home directory: %v", err)
+		}
+		workDir = fmt.Sprintf("%s/.k8s4r/tasks", homeDir)
 	}
 
 	agent := NewAgent(
@@ -278,6 +291,7 @@ func main() {
 		token,
 		robotID,
 		time.Duration(heartbeatInterval)*time.Second,
+		workDir,
 	)
 
 	agent.Run()

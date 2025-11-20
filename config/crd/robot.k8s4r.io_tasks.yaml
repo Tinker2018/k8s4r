@@ -11,16 +11,30 @@ spec:
     kind: Task
     listKind: TaskList
     plural: tasks
+    shortNames:
+    - rtask
     singular: task
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - description: Job name
+      jsonPath: .spec.jobName
+      name: Job
+      type: string
+    - description: Target robot
+      jsonPath: .spec.targetRobot
+      name: Robot
+      type: string
     - jsonPath: .spec.driver
       name: Driver
       type: string
     - jsonPath: .status.state
       name: State
       type: string
+    - description: Exit code
+      jsonPath: .status.exitCode
+      name: ExitCode
+      type: integer
     - jsonPath: .status.restartCount
       name: Restarts
       type: integer
@@ -600,6 +614,18 @@ spec:
               lastRestartTime:
                 description: LastRestartTime 最后重启时间
                 format: date-time
+                type: string
+              logs:
+                description: |-
+                  Logs 任务执行日志（仅保存最后 10KB）
+                  Agent 在任务完成后会上报日志内容到这里
+                  用户可以通过 kubectl get task <name> -o jsonpath='{.status.logs}' 查看
+                type: string
+              logsStderr:
+                description: LogsStderr 标准错误日志（最后 5KB）
+                type: string
+              logsStdout:
+                description: LogsStdout 标准输出日志（最后 5KB）
                 type: string
               message:
                 description: Message 状态描述信息

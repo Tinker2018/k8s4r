@@ -17,6 +17,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -70,9 +71,10 @@ type Response struct {
 type TaskStatusMessage struct {
 	TaskUID   string    `json:"taskUid"`
 	RobotName string    `json:"robotName"`
-	State     string    `json:"state"`
+	State     string    `json:"state"` // pending, running, completed, failed, dead
 	ExitCode  int       `json:"exitCode"`
 	Message   string    `json:"message"`
+	Event     string    `json:"event"` // 事件类型：Assigned, Downloading, DownloadFailed, Starting, Started, Completed, Failed
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
@@ -175,6 +177,20 @@ func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 		robot.Status.DeviceInfo = req.DeviceInfo
 	}
 
+	// 更新 annotation 以触发 RobotController 的 Reconcile
+	// 这样 Controller 可以立即检查心跳并更新 Phase
+	if robot.Annotations == nil {
+		robot.Annotations = make(map[string]string)
+	}
+	robot.Annotations["k8s4r.io/last-heartbeat"] = now.Format(time.RFC3339)
+
+	// 先更新 metadata (annotations)
+	if err := s.Client.Update(s.ctx, robot); err != nil {
+		logger.Error(err, "Failed to update robot annotations", "robotId", req.RobotID)
+		return
+	}
+
+	// 再更新 status
 	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
 		logger.Error(err, "Failed to update heartbeat", "robotId", req.RobotID)
 		return
@@ -197,7 +213,9 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 		"taskUid", statusMsg.TaskUID,
 		"robotName", statusMsg.RobotName,
 		"state", statusMsg.State,
-		"exitCode", statusMsg.ExitCode)
+		"event", statusMsg.Event,
+		"exitCode", statusMsg.ExitCode,
+		"message", statusMsg.Message)
 
 	// 查找对应的 Task
 	taskList := &robotv1alpha1.TaskList{}
@@ -220,8 +238,20 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// 更新 Task 状态（纯转发，不包含业务逻辑）
-	task.Status.State = robotv1alpha1.TaskState(statusMsg.State)
+	// 记录状态变更
+	oldState := task.Status.State
+
+	// 更新 Task 状态
+	// 如果任务是 dispatching，收到任何状态上报都说明 Agent 已接收，转为对应状态
+	newState := robotv1alpha1.TaskState(statusMsg.State)
+
+	// 特殊处理：如果是 pending 状态上报，且当前是 dispatching，转为 running
+	if newState == "pending" && task.Status.State == robotv1alpha1.TaskStateDispatching {
+		newState = robotv1alpha1.TaskStateRunning
+		logger.Info("Task state transition: dispatching -> running (agent acknowledged)")
+	}
+
+	task.Status.State = newState
 	task.Status.Message = statusMsg.Message
 	exitCode := int32(statusMsg.ExitCode)
 	task.Status.ExitCode = &exitCode
@@ -231,7 +261,26 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	logger.Info("Task status updated", "task", task.Name, "state", statusMsg.State)
+	// 创建 Event 记录任务执行过程
+	if statusMsg.Event != "" {
+		s.createTaskEvent(task, statusMsg.Event, statusMsg.Message)
+	}
+
+	// 如果任务完成或失败，更新 Robot 的任务状态列表
+	if newState == robotv1alpha1.TaskStateCompleted ||
+		newState == robotv1alpha1.TaskStateFailed ||
+		(newState == robotv1alpha1.TaskStateExited && exitCode == 0) {
+		logger.Info("Task finished, updating robot state", "task", task.Name, "state", newState)
+		if err := s.removeTaskFromRobotState(s.ctx, task); err != nil {
+			logger.Error(err, "Failed to remove task from robot state")
+		}
+	}
+
+	logger.Info("Task status updated",
+		"task", task.Name,
+		"oldState", oldState,
+		"newState", newState,
+		"message", statusMsg.Message)
 }
 
 // sendResponse 发送响应到 Agent
@@ -344,6 +393,12 @@ func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Tas
 		"robot", task.Spec.TargetRobot,
 		"topic", topic)
 
+	// 更新 Robot 的任务状态列表（用于 Agent 重启恢复）
+	if err := s.addTaskToRobotState(ctx, task); err != nil {
+		logger.Error(err, "Failed to update robot task state", "robot", task.Spec.TargetRobot)
+		// 不返回错误，因为任务已经分发成功
+	}
+
 	return nil
 }
 
@@ -374,6 +429,57 @@ func (s *Server) deleteTaskViaMQTT(ctx context.Context, task *robotv1alpha1.Task
 
 	logger.Info("Delete task message sent", "task", task.Name, "robot", task.Spec.TargetRobot)
 	return nil
+}
+
+// createTaskEvent 为 Task 创建 Kubernetes Event
+func (s *Server) createTaskEvent(task *robotv1alpha1.Task, eventType, message string) {
+	logger := log.FromContext(s.ctx)
+
+	// 确定事件类型（Normal 或 Warning）
+	eventKind := corev1.EventTypeNormal
+	reason := eventType
+
+	// 错误相关的事件使用 Warning 类型
+	if eventType == "DownloadFailed" || eventType == "Failed" || eventType == "StartFailed" {
+		eventKind = corev1.EventTypeWarning
+	}
+
+	// 创建 Event 对象
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s.%d", task.Name, time.Now().Unix()),
+			Namespace: task.Namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:       "Task",
+			Namespace:  task.Namespace,
+			Name:       task.Name,
+			UID:        task.UID,
+			APIVersion: "robot.k8s4r.io/v1alpha1",
+		},
+		Reason:  reason,
+		Message: message,
+		Source: corev1.EventSource{
+			Component: "k8s4r-agent",
+			Host:      task.Spec.TargetRobot,
+		},
+		FirstTimestamp: metav1.Now(),
+		LastTimestamp:  metav1.Now(),
+		Count:          1,
+		Type:           eventKind,
+	}
+
+	if err := s.Client.Create(s.ctx, event); err != nil {
+		logger.Error(err, "Failed to create event",
+			"task", task.Name,
+			"eventType", eventType,
+			"message", message)
+	} else {
+		logger.Info("Created task event",
+			"task", task.Name,
+			"eventType", eventType,
+			"message", message)
+	}
 }
 
 // Start 启动 MQTT 服务
@@ -412,8 +518,91 @@ func (s *Server) Start(ctx context.Context, brokerURL string) error {
 	go func() {
 		<-ctx.Done()
 		s.mqttClient.Disconnect(250)
-		s.cancel()
 	}()
 
 	return nil
+}
+
+// addTaskToRobotState 将任务添加到 Robot 的状态列表中
+func (s *Server) addTaskToRobotState(ctx context.Context, task *robotv1alpha1.Task) error {
+	logger := log.FromContext(ctx)
+
+	logger.Info("Updating robot task state",
+		"robot", task.Spec.TargetRobot,
+		"task", task.Name,
+		"taskUID", string(task.UID))
+
+	// 查询所有任务
+	taskList := &robotv1alpha1.TaskList{}
+	if err := s.Client.List(ctx, taskList); err != nil {
+		logger.Error(err, "Failed to list tasks")
+		return fmt.Errorf("failed to list tasks: %w", err)
+	}
+
+	logger.Info("Total tasks in cluster", "count", len(taskList.Items))
+
+	// 过滤出该 Robot 的未完成任务
+	var pendingTasks []*robotv1alpha1.Task
+	for i := range taskList.Items {
+		t := &taskList.Items[i]
+
+		// 只处理分配给该 Robot 的任务
+		if t.Spec.TargetRobot != task.Spec.TargetRobot {
+			continue
+		}
+
+		// 只保存 pending, dispatching, running 状态的任务
+		if t.Status.State == robotv1alpha1.TaskStatePending ||
+			t.Status.State == robotv1alpha1.TaskStateDispatching ||
+			t.Status.State == robotv1alpha1.TaskStateRunning ||
+			t.Status.State == "" {
+			pendingTasks = append(pendingTasks, t)
+			logger.Info("Found pending task for robot",
+				"robot", t.Spec.TargetRobot,
+				"task", t.Name,
+				"state", t.Status.State,
+				"taskUID", string(t.UID))
+		}
+	}
+
+	logger.Info("Pending tasks for robot",
+		"robot", task.Spec.TargetRobot,
+		"count", len(pendingTasks))
+
+	// 构造状态消息
+	state := struct {
+		Tasks []*robotv1alpha1.Task `json:"tasks"`
+	}{
+		Tasks: pendingTasks,
+	}
+
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	logger.Info("State payload size", "bytes", len(payload))
+
+	// 发布到 state topic（使用 retained message）
+	stateTopic := fmt.Sprintf("robots/%s/tasks/state", task.Spec.TargetRobot)
+	token := s.mqttClient.Publish(stateTopic, 1, true, payload) // retained=true
+	token.Wait()
+	if err := token.Error(); err != nil {
+		logger.Error(err, "Failed to publish state to MQTT", "topic", stateTopic)
+		return fmt.Errorf("failed to publish state: %w", err)
+	}
+
+	logger.Info("Successfully updated robot task state via MQTT",
+		"robot", task.Spec.TargetRobot,
+		"topic", stateTopic,
+		"taskCount", len(pendingTasks),
+		"retained", true)
+
+	return nil
+}
+
+// removeTaskFromRobotState 从 Robot 的状态列表中移除任务
+func (s *Server) removeTaskFromRobotState(ctx context.Context, task *robotv1alpha1.Task) error {
+	// 重新计算并更新状态（和 addTaskToRobotState 逻辑相同）
+	return s.addTaskToRobotState(ctx, task)
 }

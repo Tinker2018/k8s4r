@@ -237,6 +237,26 @@ type JobStatus struct {
 	// +optional
 	ModifyIndex int64 `json:"modifyIndex,omitempty"`
 
+	// TotalTasks 总任务数
+	// +optional
+	TotalTasks int32 `json:"totalTasks,omitempty"`
+
+	// SucceededTasks 成功完成的任务数
+	// +optional
+	SucceededTasks int32 `json:"succeededTasks,omitempty"`
+
+	// FailedTasks 失败的任务数
+	// +optional
+	FailedTasks int32 `json:"failedTasks,omitempty"`
+
+	// RunningTasks 运行中的任务数
+	// +optional
+	RunningTasks int32 `json:"runningTasks,omitempty"`
+
+	// PendingTasks 等待中的任务数
+	// +optional
+	PendingTasks int32 `json:"pendingTasks,omitempty"`
+
 	// TaskGroupSummary 任务组状态摘要
 	// +optional
 	TaskGroupSummary map[string]TaskGroupSummary `json:"taskGroupSummary,omitempty"`
@@ -265,9 +285,13 @@ type TaskGroupSummary struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:scope=Namespaced
+//+kubebuilder:resource:scope=Namespaced,shortName=rjob
 //+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
 //+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+//+kubebuilder:printcolumn:name="Total",type=integer,JSONPath=`.status.totalTasks`,description="Total tasks"
+//+kubebuilder:printcolumn:name="Succeeded",type=integer,JSONPath=`.status.succeededTasks`,description="Succeeded tasks"
+//+kubebuilder:printcolumn:name="Failed",type=integer,JSONPath=`.status.failedTasks`,description="Failed tasks"
+//+kubebuilder:printcolumn:name="Running",type=integer,JSONPath=`.status.runningTasks`,description="Running tasks"
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Job is the Schema for the jobs API

@@ -11,6 +11,8 @@ spec:
     kind: Job
     listKind: JobList
     plural: jobs
+    shortNames:
+    - rjob
     singular: job
   scope: Namespaced
   versions:
@@ -21,6 +23,22 @@ spec:
     - jsonPath: .status.status
       name: Status
       type: string
+    - description: Total tasks
+      jsonPath: .status.totalTasks
+      name: Total
+      type: integer
+    - description: Succeeded tasks
+      jsonPath: .status.succeededTasks
+      name: Succeeded
+      type: integer
+    - description: Failed tasks
+      jsonPath: .status.failedTasks
+      name: Failed
+      type: integer
+    - description: Running tasks
+      jsonPath: .status.runningTasks
+      name: Running
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -496,9 +514,21 @@ spec:
                 description: CreateIndex 创建索引
                 format: int64
                 type: integer
+              failedTasks:
+                description: FailedTasks 失败的任务数
+                format: int32
+                type: integer
               modifyIndex:
                 description: ModifyIndex 修改索引
                 format: int64
+                type: integer
+              pendingTasks:
+                description: PendingTasks 等待中的任务数
+                format: int32
+                type: integer
+              runningTasks:
+                description: RunningTasks 运行中的任务数
+                format: int32
                 type: integer
               status:
                 description: Status Job 整体状态
@@ -506,6 +536,10 @@ spec:
               statusDescription:
                 description: StatusDescription 状态描述
                 type: string
+              succeededTasks:
+                description: SucceededTasks 成功完成的任务数
+                format: int32
+                type: integer
               taskGroupSummary:
                 additionalProperties:
                   description: TaskGroupSummary 任务组状态摘要
@@ -544,6 +578,10 @@ spec:
                   type: object
                 description: TaskGroupSummary 任务组状态摘要
                 type: object
+              totalTasks:
+                description: TotalTasks 总任务数
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

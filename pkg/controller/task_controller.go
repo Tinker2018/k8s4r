@@ -189,6 +189,8 @@ func (r *TaskReconciler) dispatchTask(ctx context.Context, task *robotv1alpha1.T
 }
 
 // monitorDispatching 监控分发中的任务
+// Agent 会通过 MQTT 周期性上报状态，Server 收到后会更新 Task.Status.State
+// 所以这里不需要超时检查，只需要等待状态变化
 func (r *TaskReconciler) monitorDispatching(ctx context.Context, task *robotv1alpha1.Task) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -204,23 +206,15 @@ func (r *TaskReconciler) monitorDispatching(ctx context.Context, task *robotv1al
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// 检查是否超时（60秒）
-	dispatchTimeout := 60 * time.Second
-	if time.Since(task.Status.StartedAt.Time) > dispatchTimeout {
-		logger.Info("Task dispatch timeout", "task", task.Name)
+	// 记录等待时间（用于调试）
+	waitTime := time.Since(task.Status.StartedAt.Time)
+	logger.V(1).Info("Waiting for agent response",
+		"task", task.Name,
+		"waitTime", waitTime.String())
 
-		task.Status.State = robotv1alpha1.TaskStateFailed
-		task.Status.Message = "Dispatch timeout"
-		if err := r.Status().Update(ctx, task); err != nil {
-			logger.Error(err, "Failed to update task status")
-		}
-
-		// TODO: 重新调度或标记失败
-		return ctrl.Result{}, nil
-	}
-
-	// 继续等待 Agent 响应
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	// 继续等待 Agent 通过 MQTT 上报状态
+	// 状态上报后，Server 会将 Task.Status.State 更新为 running
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // monitorRunning 监控运行中的任务

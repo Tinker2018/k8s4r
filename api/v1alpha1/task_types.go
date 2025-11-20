@@ -449,6 +449,20 @@ type TaskStatus struct {
 	// +optional
 	Signal *int32 `json:"signal,omitempty"`
 
+	// Logs 任务执行日志（仅保存最后 10KB）
+	// Agent 在任务完成后会上报日志内容到这里
+	// 用户可以通过 kubectl get task <name> -o jsonpath='{.status.logs}' 查看
+	// +optional
+	Logs string `json:"logs,omitempty"`
+
+	// LogsStdout 标准输出日志（最后 5KB）
+	// +optional
+	LogsStdout string `json:"logsStdout,omitempty"`
+
+	// LogsStderr 标准错误日志（最后 5KB）
+	// +optional
+	LogsStderr string `json:"logsStderr,omitempty"`
+
 	// Events 任务事件列表
 	// +optional
 	Events []TaskEvent `json:"events,omitempty"`
@@ -554,8 +568,12 @@ type TaskAllocatedPort struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:resource:scope=Namespaced,shortName=rtask
+//+kubebuilder:printcolumn:name="Job",type=string,JSONPath=`.spec.jobName`,description="Job name"
+//+kubebuilder:printcolumn:name="Robot",type=string,JSONPath=`.spec.targetRobot`,description="Target robot"
 //+kubebuilder:printcolumn:name="Driver",type=string,JSONPath=`.spec.driver`
 //+kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
+//+kubebuilder:printcolumn:name="ExitCode",type=integer,JSONPath=`.status.exitCode`,description="Exit code"
 //+kubebuilder:printcolumn:name="Restarts",type=integer,JSONPath=`.status.restartCount`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

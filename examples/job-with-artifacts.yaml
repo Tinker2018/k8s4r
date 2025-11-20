@@ -1,0 +1,42 @@
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: artifact-download-test
+  namespace: default
+spec:
+  name: artifact-download-test
+  taskGroups:
+    - name: workers
+      count: 1
+      restartPolicy:
+        attempts: 2
+        delay: "5s"
+        mode: fail
+      tasks:
+        - name: download-and-execute
+          driver: exec
+          # 下载脚本文件并执行
+          artifacts:
+            - getterSource: "http://10.30.16.166/README.md"
+              relativeDest: "local/README.md"
+              getterMode: "file"
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - "-c"
+                - |
+                  echo "=== Artifact Download Test ==="
+                  echo "Current directory: $(pwd)"
+                  echo "Files in local/:"
+                  ls -la local/
+                  echo ""
+                  echo "README.md content (first 10 lines):"
+                  head -10 local/README.md
+                  echo ""
+                  echo "Test completed successfully!"
+          resources:
+            cpu: 100
+            memory: 128
+          env:
+            TEST_MODE: "artifact"

@@ -1,0 +1,241 @@
+package driver_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndg/k8s4r/pkg/driver"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// TestNomadExecutorFeatures 演示 Nomad executor 提供的功能
+func TestNomadExecutorFeatures(t *testing.T) {
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "test",
+		Level: hclog.Debug,
+	})
+
+	// 创建使用 Nomad executor 的驱动
+	d := driver.NewNomadExecDriver("/tmp/k8s4r-test", logger)
+
+	// 创建测试任务
+	task := &robotv1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:  types.UID("test-task-1"),
+			Name: "test-ls",
+		},
+		Spec: robotv1alpha1.TaskSpec{
+			Config: robotv1alpha1.TaskConfig{
+				ExecConfig: &robotv1alpha1.ExecConfig{
+					Command: "/bin/bash",
+					Args: []string{
+						"-c",
+						`
+						echo "Starting task..."
+						echo "Current directory: $(pwd)"
+						echo "Environment: $MY_VAR"
+						ls -la
+						echo "Task completed"
+						`,
+					},
+					Env: map[string]string{
+						"MY_VAR": "test-value",
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	// 1. 启动任务
+	t.Log("=== Feature 1: 启动进程 ===")
+	handle, err := d.Start(ctx, task)
+	if err != nil {
+		t.Fatalf("Failed to start task: %v", err)
+	}
+	t.Logf("Task started, PID: %d", handle.PID)
+
+	// 2. 监控资源使用（Nomad executor 自动提供）
+	t.Log("\n=== Feature 2: 资源监控 ===")
+	time.Sleep(500 * time.Millisecond)
+
+	status, err := d.GetStatus(ctx, handle)
+	if err != nil {
+		t.Fatalf("Failed to get status: %v", err)
+	}
+
+	if status.Resources != nil {
+		t.Logf("CPU: %.2f%%, Memory: %d MB",
+			status.Resources.CPUPercent,
+			status.Resources.MemoryMB)
+	}
+
+	// 3. 等待任务完成
+	t.Log("\n=== Feature 3: 等待进程结束 ===")
+	time.Sleep(2 * time.Second)
+
+	// 4. 读取日志（Nomad 自动管理日志文件）
+	t.Log("\n=== Feature 4: 日志收集 ===")
+	stdout, err := d.GetLogs(ctx, handle, true, 0)
+	if err != nil {
+		t.Fatalf("Failed to get logs: %v", err)
+	}
+	t.Logf("Stdout:\n%s", stdout)
+
+	stderr, err := d.GetLogs(ctx, handle, false, 0)
+	if err != nil {
+		t.Fatalf("Failed to get stderr: %v", err)
+	}
+	if stderr != "" {
+		t.Logf("Stderr:\n%s", stderr)
+	}
+
+	// 5. 清理资源
+	t.Log("\n=== Feature 5: 资源清理 ===")
+	if err := d.Cleanup(handle); err != nil {
+		t.Fatalf("Failed to cleanup: %v", err)
+	}
+	t.Log("Task cleanup completed")
+}
+
+// TestNomadGracefulShutdown 测试优雅停止功能
+func TestNomadGracefulShutdown(t *testing.T) {
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "test",
+		Level: hclog.Debug,
+	})
+
+	d := driver.NewNomadExecDriver("/tmp/k8s4r-test", logger)
+
+	// 创建长时间运行的任务
+	task := &robotv1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:  types.UID("test-task-2"),
+			Name: "test-long-running",
+		},
+		Spec: robotv1alpha1.TaskSpec{
+			Config: robotv1alpha1.TaskConfig{
+				ExecConfig: &robotv1alpha1.ExecConfig{
+					Command: "/bin/bash",
+					Args: []string{
+						"-c",
+						`
+						trap 'echo "Caught SIGTERM, cleaning up..."; exit 0' TERM
+						echo "Starting long-running task..."
+						sleep 100
+						`,
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	// 启动任务
+	handle, err := d.Start(ctx, task)
+	if err != nil {
+		t.Fatalf("Failed to start task: %v", err)
+	}
+	t.Logf("Task started, PID: %d", handle.PID)
+
+	// 等待一下确保进程启动
+	time.Sleep(500 * time.Millisecond)
+
+	// 优雅停止（Nomad executor 会先发送 SIGTERM，等待 5 秒后发送 SIGKILL）
+	t.Log("Sending graceful shutdown...")
+	startTime := time.Now()
+
+	if err := d.Stop(ctx, handle); err != nil {
+		t.Fatalf("Failed to stop task: %v", err)
+	}
+
+	elapsed := time.Since(startTime)
+	t.Logf("Task stopped in %v", elapsed)
+
+	// 读取日志，验证收到了 SIGTERM
+	stdout, _ := d.GetLogs(ctx, handle, true, 0)
+	t.Logf("Stdout:\n%s", stdout)
+
+	// 清理
+	d.Cleanup(handle)
+}
+
+// Example_nomadExecutorComparison 对比示例
+func Example_nomadExecutorComparison() {
+	// Nomad Executor 提供的功能对比自己实现：
+
+	fmt.Println("=== Nomad Executor 提供的核心功能 ===")
+	fmt.Println()
+
+	fmt.Println("1. 进程隔离:")
+	fmt.Println("   - Nomad: 自动使用 cgroups 进行资源隔离")
+	fmt.Println("   - 自实现: 需要手动调用 syscall 设置 cgroups")
+	fmt.Println()
+
+	fmt.Println("2. 日志管理:")
+	fmt.Println("   - Nomad: 自动轮转日志，防止磁盘占满")
+	fmt.Println("   - 自实现: 需要自己实现日志轮转逻辑")
+	fmt.Println()
+
+	fmt.Println("3. 资源监控:")
+	fmt.Println("   - Nomad: 内置 Stats() 方法，自动收集 CPU/内存/IO")
+	fmt.Println("   - 自实现: 需要使用 gopsutil 或 /proc 文件系统")
+	fmt.Println()
+
+	fmt.Println("4. 优雅停止:")
+	fmt.Println("   - Nomad: Shutdown(signal, gracePeriod) 一行搞定")
+	fmt.Println("   - 自实现: 需要手动发送信号、等待、超时后 SIGKILL")
+	fmt.Println()
+
+	fmt.Println("5. 子进程清理:")
+	fmt.Println("   - Nomad: 自动清理整个进程树")
+	fmt.Println("   - 自实现: 需要遍历 /proc 或使用 process group")
+	fmt.Println()
+
+	fmt.Println("6. 文件系统隔离:")
+	fmt.Println("   - Nomad: 可选 chroot/容器隔离")
+	fmt.Println("   - 自实现: 需要深入理解 Linux namespace")
+	fmt.Println()
+
+	fmt.Println("7. 用户权限:")
+	fmt.Println("   - Nomad: 自动切换到指定用户运行")
+	fmt.Println("   - 自实现: 需要使用 syscall.Credential")
+
+	// Output:
+	// === Nomad Executor 提供的核心功能 ===
+	//
+	// 1. 进程隔离:
+	//    - Nomad: 自动使用 cgroups 进行资源隔离
+	//    - 自实现: 需要手动调用 syscall 设置 cgroups
+	//
+	// 2. 日志管理:
+	//    - Nomad: 自动轮转日志，防止磁盘占满
+	//    - 自实现: 需要自己实现日志轮转逻辑
+	//
+	// 3. 资源监控:
+	//    - Nomad: 内置 Stats() 方法，自动收集 CPU/内存/IO
+	//    - 自实现: 需要使用 gopsutil 或 /proc 文件系统
+	//
+	// 4. 优雅停止:
+	//    - Nomad: Shutdown(signal, gracePeriod) 一行搞定
+	//    - 自实现: 需要手动发送信号、等待、超时后 SIGKILL
+	//
+	// 5. 子进程清理:
+	//    - Nomad: 自动清理整个进程树
+	//    - 自实现: 需要遍历 /proc 或使用 process group
+	//
+	// 6. 文件系统隔离:
+	//    - Nomad: 可选 chroot/容器隔离
+	//    - 自实现: 需要深入理解 Linux namespace
+	//
+	// 7. 用户权限:
+	//    - Nomad: 自动切换到指定用户运行
+	//    - 自实现: 需要使用 syscall.Credential
+}

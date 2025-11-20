@@ -78,17 +78,18 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		job.Status.Status = "pending"
 		job.Status.StatusDescription = "No matching robots found"
 		r.Status().Update(ctx, job)
-		return ctrl.Result{RequeueAfter: 30}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	logger.Info("Found matching robots",
 		"count", len(matchedRobots),
 		"selector", job.Spec.RobotSelector)
 
-	// 为每个 TaskGroup 创建 Task
+	// 检查并重建被删除的 Task（如果 Job 未完成）
+	// 这会确保即使 Task 被手动删除，也会自动重新创建
 	for _, taskGroup := range job.Spec.TaskGroups {
-		if err := r.createTasksForGroup(ctx, job, &taskGroup, matchedRobots); err != nil {
-			logger.Error(err, "Failed to create tasks for group", "group", taskGroup.Name)
+		if err := r.ensureTasksForGroup(ctx, job, &taskGroup, matchedRobots); err != nil {
+			logger.Error(err, "Failed to ensure tasks for group", "group", taskGroup.Name)
 			return ctrl.Result{}, err
 		}
 	}
@@ -160,8 +161,9 @@ func matchesLabels(robotLabels, selector map[string]string) bool {
 	return true
 }
 
-// createTasksForGroup 为 TaskGroup 创建 Task 实例
-func (r *JobReconciler) createTasksForGroup(
+// ensureTasksForGroup 确保 TaskGroup 的所有 Task 都存在
+// 如果 Task 被删除，会自动重新创建（只要 Job 还在运行）
+func (r *JobReconciler) ensureTasksForGroup(
 	ctx context.Context,
 	job *robotv1alpha1.Job,
 	taskGroup *robotv1alpha1.TaskGroup,
@@ -190,12 +192,28 @@ func (r *JobReconciler) createTasksForGroup(
 			}, existingTask)
 
 			if err == nil {
-				// Task 已存在，跳过
-				logger.V(1).Info("Task already exists", "task", taskName)
+				// Task 已存在
+				// 如果 Task 已完成或失败，不重新创建
+				if existingTask.Status.State == robotv1alpha1.TaskStateCompleted ||
+					existingTask.Status.State == robotv1alpha1.TaskStateFailed ||
+					(existingTask.Status.State == robotv1alpha1.TaskStateExited &&
+						existingTask.Status.ExitCode != nil && *existingTask.Status.ExitCode == 0) {
+					logger.V(1).Info("Task already completed, skipping", "task", taskName)
+					continue
+				}
+
+				// Task 正在运行或等待中，不重复创建
+				logger.V(1).Info("Task exists and running", "task", taskName, "state", existingTask.Status.State)
 				continue
 			}
 
-			// 创建新的 Task
+			if !errors.IsNotFound(err) {
+				// 其他错误
+				return err
+			}
+
+			// Task 不存在，创建新的 Task
+			logger.Info("Creating new task", "task", taskName, "robot", robot.Name)
 			task := &robotv1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
@@ -206,10 +224,12 @@ func (r *JobReconciler) createTasksForGroup(
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: job.APIVersion,
-							Kind:       job.Kind,
-							Name:       job.Name,
-							UID:        job.UID,
+							APIVersion:         job.APIVersion,
+							Kind:               job.Kind,
+							Name:               job.Name,
+							UID:                job.UID,
+							Controller:         boolPtr(true),
+							BlockOwnerDeletion: boolPtr(true),
 						},
 					},
 				},
@@ -245,6 +265,11 @@ func (r *JobReconciler) createTasksForGroup(
 	return nil
 }
 
+// boolPtr 返回 bool 指针
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 // updateJobStatus 根据 Task 状态更新 Job 状态
 // 这个函数会在以下情况被调用：
 // 1. JobReconciler 创建 Task 后
@@ -264,17 +289,21 @@ func (r *JobReconciler) updateJobStatus(ctx context.Context, job *robotv1alpha1.
 		// 还没有创建 Task
 		job.Status.Status = "pending"
 		job.Status.StatusDescription = "Creating tasks"
+		job.Status.TotalTasks = 0
+		job.Status.SucceededTasks = 0
+		job.Status.FailedTasks = 0
+		job.Status.RunningTasks = 0
+		job.Status.PendingTasks = 0
 		return r.Status().Update(ctx, job)
 	}
 
 	// 统计各状态的 Task 数量
 	var (
-		totalTasks     = len(taskList.Items)
-		pendingTasks   = 0
-		runningTasks   = 0
-		completedTasks = 0
-		failedTasks    = 0
-		exitedTasks    = 0
+		totalTasks     = int32(len(taskList.Items))
+		pendingTasks   = int32(0)
+		runningTasks   = int32(0)
+		succeededTasks = int32(0)
+		failedTasks    = int32(0)
 	)
 
 	for _, task := range taskList.Items {
@@ -286,39 +315,59 @@ func (r *JobReconciler) updateJobStatus(ctx context.Context, job *robotv1alpha1.
 		case robotv1alpha1.TaskStateRunning:
 			runningTasks++
 		case robotv1alpha1.TaskStateCompleted:
-			completedTasks++
+			succeededTasks++
 		case robotv1alpha1.TaskStateFailed:
 			failedTasks++
 		case robotv1alpha1.TaskStateExited:
-			exitedTasks++
+			// exited 状态需要根据 exitCode 判断
+			if task.Status.ExitCode != nil && *task.Status.ExitCode == 0 {
+				succeededTasks++
+			} else {
+				failedTasks++
+			}
 		}
 	}
 
+	// 更新统计字段
+	job.Status.TotalTasks = totalTasks
+	job.Status.SucceededTasks = succeededTasks
+	job.Status.FailedTasks = failedTasks
+	job.Status.RunningTasks = runningTasks
+	job.Status.PendingTasks = pendingTasks
+
 	// 决定 Job 的最终状态
-	if completedTasks == totalTasks {
-		// 所有 Task 都完成
+	if succeededTasks == totalTasks {
+		// 所有 Task 都成功完成
 		job.Status.Status = "complete"
-		job.Status.StatusDescription = fmt.Sprintf("All %d tasks completed", totalTasks)
-	} else if failedTasks > 0 {
-		// 有失败的 Task
-		job.Status.Status = "failed"
-		job.Status.StatusDescription = fmt.Sprintf("%d/%d tasks failed", failedTasks, totalTasks)
-	} else if runningTasks > 0 || exitedTasks > 0 {
+		job.Status.StatusDescription = fmt.Sprintf("All %d tasks completed successfully", totalTasks)
+	} else if succeededTasks+failedTasks == totalTasks {
+		// 所有 Task 都已结束（有成功有失败）
+		if failedTasks > 0 {
+			job.Status.Status = "failed"
+			job.Status.StatusDescription = fmt.Sprintf("%d succeeded, %d failed out of %d tasks",
+				succeededTasks, failedTasks, totalTasks)
+		} else {
+			// 理论上不会走到这里，因为上面已经处理了全部成功的情况
+			job.Status.Status = "complete"
+			job.Status.StatusDescription = fmt.Sprintf("All %d tasks completed", totalTasks)
+		}
+	} else if runningTasks > 0 {
 		// 有正在运行的 Task
 		job.Status.Status = "running"
-		job.Status.StatusDescription = fmt.Sprintf("Running: %d, Completed: %d/%d",
-			runningTasks, completedTasks, totalTasks)
+		job.Status.StatusDescription = fmt.Sprintf("Running: %d, Succeeded: %d, Failed: %d, Pending: %d",
+			runningTasks, succeededTasks, failedTasks, pendingTasks)
 	} else {
 		// 所有 Task 都在等待
 		job.Status.Status = "pending"
-		job.Status.StatusDescription = fmt.Sprintf("Pending: %d/%d", pendingTasks, totalTasks)
+		job.Status.StatusDescription = fmt.Sprintf("Pending: %d, Succeeded: %d, Failed: %d",
+			pendingTasks, succeededTasks, failedTasks)
 	}
 
 	logger.Info("Updated job status",
 		"job", job.Name,
 		"status", job.Status.Status,
 		"total", totalTasks,
-		"completed", completedTasks,
+		"succeeded", succeededTasks,
 		"running", runningTasks,
 		"failed", failedTasks,
 		"pending", pendingTasks)
