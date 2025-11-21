@@ -154,6 +154,7 @@ func (r *TaskGroupReconciler) ensureTasksForTaskGroup(ctx context.Context, taskG
 			},
 			Spec: robotv1alpha1.TaskSpec{
 				Name:        taskDef.Name,
+				JobName:     taskGroup.Spec.JobName, // 设置 JobName，TaskController 需要用它查找 Job
 				Driver:      taskDef.Driver,
 				Config:      taskDef.Config,
 				Resources:   taskDef.Resources,

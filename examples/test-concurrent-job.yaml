@@ -1,0 +1,44 @@
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-concurrent-job
+  namespace: default
+spec:
+  name: test-concurrent-job
+  
+  # 空 robotSelector 匹配所有 Online 的 Robot
+  robotSelector: {}
+  
+  type: batch
+  priority: 100
+  
+  taskGroups:
+    - name: concurrent-group
+      count: 2  # 创建 2 个并发任务
+      
+      tasks:
+        # Task 1: sleep 2s && echo hello
+        - name: task-sleep-2s
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/sh
+              args:
+                - -c
+                - "sleep 2 && echo 'hello from task 1 (2s)'"
+          
+          env:
+            TASK_NAME: "task-1"
+        
+        # Task 2: sleep 5s && echo hello  
+        - name: task-sleep-5s
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/sh
+              args:
+                - -c
+                - "sleep 5 && echo 'hello from task 2 (5s)'"
+          
+          env:
+            TASK_NAME: "task-2"

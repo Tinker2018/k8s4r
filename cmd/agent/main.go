@@ -185,13 +185,17 @@ func (a *Agent) setupMQTT() error {
 
 // handleResponse 处理服务器响应
 func (a *Agent) handleResponse(client mqtt.Client, msg mqtt.Message) {
+	// 打印完整的 MQTT 消息
+	log.Printf("📥 [MQTT] Received response message - topic: %s, payload: %s",
+		msg.Topic(), string(msg.Payload()))
+
 	var response Response
 	if err := json.Unmarshal(msg.Payload(), &response); err != nil {
 		log.Printf("Failed to unmarshal response: %v", err)
 		return
 	}
 
-	log.Printf("Received response: success=%v, message=%s", response.Success, response.Message)
+	log.Printf("📥 [MQTT] Parsed response: success=%v, message=%s", response.Success, response.Message)
 
 	// 将响应发送到通道
 	select {

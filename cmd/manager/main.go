@@ -12,8 +12,10 @@ package main
 
 import (
 	"flag"
+	"net"
 	"os"
 
+	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -22,8 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	pb "github.com/hxndg/k8s4r/api/grpc"
 	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
 	"github.com/hxndg/k8s4r/pkg/controller"
+	"github.com/hxndg/k8s4r/pkg/manager"
 )
 
 var (
@@ -40,9 +44,13 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var grpcAddr string
+	var namespace string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&grpcAddr, "grpc-bind-address", ":9090", "The address the gRPC server binds to.")
+	flag.StringVar(&namespace, "namespace", "default", "The namespace to watch for resources.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -79,9 +87,12 @@ func main() {
 	}
 
 	// 设置 TaskReconciler（负责调度、分发逻辑）
+	taskStreamManager := manager.NewTaskStreamManager(mgr.GetClient(), namespace)
+
 	if err = (&controller.TaskReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		TaskStreamManager: taskStreamManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -107,6 +118,34 @@ func main() {
 
 	setupLog.Info("Controllers initialized")
 
+	// ========== 启动 gRPC Server ==========
+	// Manager 提供 gRPC 服务，Server 通过 gRPC 调用来通知状态变化
+	setupLog.Info("Starting gRPC server", "address", grpcAddr)
+
+	grpcServer := grpc.NewServer()
+
+	// 创建复合服务，同时实现 unary RPC 和 StreamTasks
+	compositeService := &manager.CompositeGRPCService{
+		GRPCServer:        manager.NewGRPCServer(mgr.GetClient(), namespace),
+		TaskStreamManager: taskStreamManager,
+	}
+	pb.RegisterRobotManagerServer(grpcServer, compositeService)
+
+	lis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		setupLog.Error(err, "failed to listen on gRPC address", "address", grpcAddr)
+		os.Exit(1)
+	}
+
+	// 在单独的 goroutine 中启动 gRPC Server
+	go func() {
+		setupLog.Info("gRPC server listening", "address", grpcAddr)
+		if err := grpcServer.Serve(lis); err != nil {
+			setupLog.Error(err, "failed to serve gRPC")
+			os.Exit(1)
+		}
+	}()
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -121,4 +160,8 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
+	// 优雅停止 gRPC Server
+	setupLog.Info("Shutting down gRPC server")
+	grpcServer.GracefulStop()
 }

@@ -105,6 +105,9 @@ func NewServer(client client.Client, namespace string) *Server {
 // ===== MQTT → K8s 消息转发 =====
 
 // RegisterHandler 处理 Agent 注册（MQTT → K8s）
+// ========== 设计原则 ==========
+// Server 只负责接收 MQTT 消息并通知 Manager（通过更新 annotation）
+// RobotController 负责所有状态管理（创建 Robot、更新 Phase、更新心跳时间）
 func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 	logger := log.FromContext(s.ctx)
 
@@ -114,9 +117,9 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	logger.Info("Received register request", "robotId", req.RobotID)
+	logger.Info("📥 [SERVER] Received register request from MQTT", "robotId", req.RobotID)
 
-	// 查找 Robot 资源
+	// 查找或创建 Robot 资源
 	robot := &robotv1alpha1.Robot{}
 	err := s.Client.Get(s.ctx, types.NamespacedName{
 		Name:      req.RobotID,
@@ -124,11 +127,14 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 	}, robot)
 
 	if err != nil {
-		// Robot 不存在，创建新的（状态为 Pending，等待 Controller 批准）
+		// Robot 不存在，创建新的（状态留空，由 RobotController 初始化）
 		robot = &robotv1alpha1.Robot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      req.RobotID,
 				Namespace: s.Namespace,
+				Annotations: map[string]string{
+					"k8s4r.io/registration-time": time.Now().Format(time.RFC3339),
+				},
 			},
 			Spec: robotv1alpha1.RobotSpec{
 				RobotID:     req.RobotID,
@@ -137,31 +143,46 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 		}
 
 		if err := s.Client.Create(s.ctx, robot); err != nil {
-			logger.Error(err, "Failed to create Robot resource", "robotId", req.RobotID)
+			logger.Error(err, "❌ [SERVER] Failed to create Robot resource", "robotId", req.RobotID)
 			s.sendResponse(req.RobotID, false, "Failed to register robot")
 			return
 		}
 
-		logger.Info("Created Robot resource", "robotId", req.RobotID, "phase", "Pending")
+		logger.Info("✅ [SERVER] Created Robot resource, waiting for RobotController to initialize",
+			"robotId", req.RobotID)
 	}
 
-	// 更新心跳和设备信息（Server 只负责更新，不改变 Phase）
-	now := metav1.Now()
-	robot.Status.LastHeartbeatTime = &now
-	robot.Status.DeviceInfo = req.DeviceInfo
-	robot.Status.Message = "Registration received"
+	// ========== 🔥 关键改动：Server 只更新 annotation，不修改 status ==========
+	// 通过更新 annotation 通知 RobotController 处理注册事件
+	// RobotController 会：1. 更新 LastHeartbeatTime  2. 更新 DeviceInfo  3. 设置 Phase = Online
+	if robot.Annotations == nil {
+		robot.Annotations = make(map[string]string)
+	}
+	robot.Annotations["k8s4r.io/last-register"] = time.Now().Format(time.RFC3339)
 
-	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
-		logger.Error(err, "Failed to update Robot status", "robotId", req.RobotID)
-		s.sendResponse(req.RobotID, false, "Failed to update status")
+	// 将 DeviceInfo 序列化到 annotation（Controller 会读取并更新到 status）
+	if req.DeviceInfo != nil {
+		deviceInfoJSON, _ := json.Marshal(req.DeviceInfo)
+		robot.Annotations["k8s4r.io/device-info"] = string(deviceInfoJSON)
+	}
+
+	if err := s.Client.Update(s.ctx, robot); err != nil {
+		logger.Error(err, "❌ [SERVER] Failed to update Robot annotations", "robotId", req.RobotID)
+		s.sendResponse(req.RobotID, false, "Failed to update registration")
 		return
 	}
 
-	logger.Info("Robot registration processed", "robotId", req.RobotID)
-	s.sendResponse(req.RobotID, true, "Registration received, waiting for approval")
+	logger.Info("� [SERVER] Notified RobotController about registration",
+		"robotId", req.RobotID,
+		"annotation", "k8s4r.io/last-register")
+
+	s.sendResponse(req.RobotID, true, "Registration received, processing by controller")
 }
 
 // HeartbeatHandler 处理心跳（MQTT → K8s）
+// ========== 设计原则 ==========
+// Server 只负责接收 MQTT 消息并通知 Manager（通过更新 annotation）
+// RobotController 负责所有状态管理（更新 LastHeartbeatTime、更新 Phase）
 func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 	logger := log.FromContext(s.ctx)
 
@@ -183,33 +204,28 @@ func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// 只更新心跳时间和设备信息，不修改 Phase（由 Controller 管理）
-	now := metav1.Now()
-	robot.Status.LastHeartbeatTime = &now
-	if req.DeviceInfo != nil {
-		robot.Status.DeviceInfo = req.DeviceInfo
-	}
-
-	// 更新 annotation 以触发 RobotController 的 Reconcile
-	// 这样 Controller 可以立即检查心跳并更新 Phase
+	// ========== 🔥 关键改动：Server 只更新 annotation，不修改 status ==========
+	// 通过更新 annotation 通知 RobotController 处理心跳事件
+	// RobotController 会：1. 更新 LastHeartbeatTime  2. 更新 DeviceInfo  3. 检查并设置 Phase
 	if robot.Annotations == nil {
 		robot.Annotations = make(map[string]string)
 	}
-	robot.Annotations["k8s4r.io/last-heartbeat"] = now.Format(time.RFC3339)
+	robot.Annotations["k8s4r.io/last-heartbeat"] = time.Now().Format(time.RFC3339)
 
-	// 先更新 metadata (annotations)
+	// 将 DeviceInfo 序列化到 annotation（如果有的话）
+	if req.DeviceInfo != nil {
+		deviceInfoJSON, _ := json.Marshal(req.DeviceInfo)
+		robot.Annotations["k8s4r.io/device-info"] = string(deviceInfoJSON)
+	}
+
 	if err := s.Client.Update(s.ctx, robot); err != nil {
-		logger.Error(err, "Failed to update robot annotations", "robotId", req.RobotID)
+		logger.Error(err, "❌ [SERVER] Failed to update robot annotations", "robotId", req.RobotID)
 		return
 	}
 
-	// 再更新 status
-	if err := s.Client.Status().Update(s.ctx, robot); err != nil {
-		logger.Error(err, "Failed to update heartbeat", "robotId", req.RobotID)
-		return
-	}
-
-	logger.V(1).Info("Heartbeat updated", "robotId", req.RobotID)
+	logger.V(1).Info("� [SERVER] Notified RobotController about heartbeat",
+		"robotId", req.RobotID,
+		"annotation", "k8s4r.io/last-heartbeat")
 }
 
 // TaskStatusHandler 处理任务状态上报（MQTT → K8s）

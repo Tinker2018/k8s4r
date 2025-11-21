@@ -220,13 +220,20 @@ func (te *TaskExecutor) handleStateRecovery(ctx context.Context, msg mqtt.Messag
 
 // handleTaskMessage 处理接收到的任务消息
 func (te *TaskExecutor) handleTaskMessage(ctx context.Context, msg mqtt.Message) {
-	te.logger.Info("received task message", "topic", msg.Topic())
+	// 打印完整的 MQTT 消息
+	te.logger.Info("📥 [MQTT] Received task dispatch message",
+		"topic", msg.Topic(),
+		"payload", string(msg.Payload()))
 
 	var taskMsg TaskMessage
 	if err := json.Unmarshal(msg.Payload(), &taskMsg); err != nil {
 		te.logger.Error("failed to unmarshal task message", "error", err)
 		return
 	}
+
+	te.logger.Info("📥 [MQTT] Parsed task message",
+		"action", taskMsg.Action,
+		"taskUID", string(taskMsg.Task.UID))
 
 	switch taskMsg.Action {
 	case "create":

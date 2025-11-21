@@ -939,16 +939,460 @@ k8s4r/register {"robotId":"robot-debug-01","token":"fixed-token-123",...}
 k8s4r/heartbeat {"robotId":"robot-debug-01","timestamp":"2025-11-21T10:30:00Z"}
 
 # 注册响应
-k8s4r/robots/robot-debug-01/response {"status":"approved","message":"Registration successful"}
+k8s4r/robots/robot-debug-001/response {"status":"approved","message":"Registration successful"}
 
 # 任务分发
-k8s4r/robots/robot-debug-01/tasks/dispatch {"metadata":{"uid":"xxx"},"spec":{...}}
+k8s4r/robots/robot-debug-001/tasks/dispatch {"metadata":{"uid":"xxx"},"spec":{...}}
 
 # 任务状态上报
-k8s4r/robots/robot-debug-01/tasks/xxx-xxx-xxx/status {"state":"running","message":"Process started"}
+k8s4r/robots/robot-debug-001/tasks/xxx-xxx-xxx/status {"state":"running","message":"Process started"}
 
 # 任务状态同步（Agent 启动时恢复状态用）
-k8s4r/robots/robot-debug-01/tasks/state {"tasks":[{"uid":"xxx","state":"running"}]}
+k8s4r/robots/robot-debug-001/tasks/state {"tasks":[{"uid":"xxx","state":"running"}]}
+```
+
+---
+
+## 🚀 gRPC 双向流架构测试
+
+### 测试目标
+
+验证 Server 与 Manager 之间的 gRPC 双向流通信，确保：
+- ✅ Server 完全解耦 Kubernetes（无 K8s 依赖）
+- ✅ Manager 通过 gRPC Stream 推送任务到 Server
+- ✅ Server 通过 MQTT 转发任务到 Agent
+- ✅ Agent 状态通过 MQTT → gRPC → Manager 上报
+
+### 架构概览
+
+```
+┌─────────────┐  gRPC Stream   ┌─────────────┐    MQTT     ┌─────────────┐
+│   Manager   │◄──────────────►│   Server    │◄───────────►│    Agent    │
+│             │  TaskCommand   │             │  dispatch   │             │
+│ (K8s+gRPC)  │  TaskEvent     │ (gRPC+MQTT) │  status     │   (MQTT)    │
+│             │                │  无K8s依赖  │             │             │
+└─────────────┘                └─────────────┘             └─────────────┘
+```
+
+### 步骤 1: 启动 MQTT Broker
+
+**Terminal 1**:
+```bash
+cd /Users/hxndg/code_test/k8s4r
+./config/mosquitto/start-mosquitto.sh simple
+```
+
+**验证**:
+```bash
+./config/mosquitto/start-mosquitto.sh status
+# 应该看到 mosquitto 进程在运行
+```
+
+---
+
+### 步骤 2: 启动 Manager (gRPC Server)
+
+**Terminal 2**:
+```bash
+cd /Users/hxndg/code_test/k8s4r
+go run cmd/manager/main.go \
+  --grpc-bind-address=:9090 \
+  --namespace=default
+```
+
+**期望输出**:
+```
+Controllers initialized
+🚀 Starting gRPC server address=:9090
+gRPC server listening address=:9090
+starting manager
+```
+
+**验证 gRPC 端口**:
+```bash
+# 新开 terminal 验证
+lsof -i :9090
+# 应该看到 manager 进程监听 9090 端口
+```
+
+---
+
+### 步骤 3: 启动 Server (gRPC Client + MQTT Bridge)
+
+**Terminal 3**:
+```bash
+cd /Users/hxndg/code_test/k8s4r
+go run cmd/server/main.go \
+  --broker-url=tcp://localhost:1883 \
+  --grpc-addr=localhost:9090
+```
+
+**期望输出**:
+```
+🚀 Starting Server (gRPC + MQTT, NO Kubernetes dependency)
+Connecting to Manager gRPC server address=localhost:9090
+✅ Connected to Manager gRPC server
+Initializing StreamTasks bidirectional stream
+✅ StreamTasks initialized
+Connecting to MQTT broker broker=tcp://localhost:1883
+✅ Connected to MQTT broker
+📡 Started receiving tasks from Manager stream
+✅ Subscribed to MQTT topics
+✅ GRPCStreamServer started successfully
+```
+
+**关键验证点**:
+- ✅ gRPC 连接成功（localhost:9090）
+- ✅ StreamTasks 双向流初始化成功
+- ✅ MQTT 连接成功
+- ✅ 订阅了 register, heartbeat, task status topics
+
+**Manager 日志应该显示**:
+```
+📥 [GRPC STREAM] New stream connection registered
+```
+
+---
+
+### 步骤 4: 启动 Agent
+
+**Terminal 4**:
+```bash
+cd /Users/hxndg/code_test/k8s4r
+go run cmd/agent/main.go \
+  --broker-url=tcp://localhost:1883 \
+  --robot-id=robot-debug-001 \
+  --token=fixed-token-123
+```
+
+**期望输出**:
+```
+Starting agent for robot: robot-debug-001
+MQTT Broker: tcp://localhost:1883
+Connected to MQTT broker: tcp://localhost:1883
+Subscribed to response topic: k8s4r/robots/robot-debug-001/response
+Attempting to register...
+Published registration request
+Received response: success=true, message=Robot registered successfully
+✅ Registration successful
+Starting heartbeat (interval: 30s)
+Sent heartbeat
+```
+
+**Server 日志应该显示**:
+```
+📥 [MQTT] Received registration robotId=robot-debug-001
+✅ [GRPC] Registration reported to Manager success=true
+📤 [MQTT] Published response to Agent robotId=robot-debug-001 topic=k8s4r/robots/robot-debug-001/response success=true
+```
+
+**Manager 日志应该显示**:
+```
+📥 [GRPC] Received registration request robotId=robot-debug-001
+Created/Updated Robot robotId=robot-debug-001 phase=Online
+✅ Robot registered successfully
+```
+
+---
+
+### 步骤 5: 验证 Robot 资源
+
+**Terminal 5**:
+```bash
+# 查看 Robot 是否创建
+kubectl get robots
+
+# 期望输出：
+# NAME               PHASE    AGE
+# robot-debug-001    Online   30s
+
+# 查看详细信息
+kubectl describe robot robot-debug-001
+```
+
+**应该看到**:
+```yaml
+Status:
+  Phase: Online
+  Last Heartbeat Time: 2025-11-21T17:40:00Z
+  Message: Robot is online
+  Device Info:
+    Hostname: xxx
+    OS: darwin/arm64
+    CPU: ...
+```
+
+---
+
+### 步骤 6: 创建测试 Job (验证任务分发)
+
+**Terminal 5**:
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: grpc-test-job
+spec:
+  robotSelector: {}  # 空 selector 匹配所有 robot
+  taskGroups:
+    - name: concurrent-tasks
+      count: 2  # 创建 2 个并发任务
+      template:
+        driver: exec
+        config:
+          command: "sleep 3 && echo 'Task completed via gRPC Stream'"
+EOF
+```
+
+---
+
+### 步骤 7: 观察任务分发流程
+
+**Manager 日志 (Terminal 2) 应该显示**:
+```
+📊 [JOB CONTROLLER] Creating TaskGroup job=grpc-test-job
+✅ [JOB CONTROLLER] TaskGroup created name=grpc-test-job-concurrent-tasks
+
+📊 [TASKGROUP CONTROLLER] Creating 2 Tasks taskGroup=grpc-test-job-concurrent-tasks count=2
+✅ [TASKGROUP CONTROLLER] Task created name=grpc-test-job-concurrent-tasks-0
+✅ [TASKGROUP CONTROLLER] Task created name=grpc-test-job-concurrent-tasks-1
+
+🎯 [TASK CONTROLLER] Scheduling task task=grpc-test-job-concurrent-tasks-0
+🎯 [TASK CONTROLLER] Robot selected task=grpc-test-job-concurrent-tasks-0 robot=robot-debug-001
+📤 [GRPC STREAM] Pushing task to stream taskUID=xxx-xxx-xxx
+```
+
+**Server 日志 (Terminal 3) 应该显示**:
+```
+📥 [GRPC STREAM] Received CREATE_TASK from Manager taskUID=xxx-xxx-xxx taskName=grpc-test-job-concurrent-tasks-0
+📤 [GRPC STREAM] Sent TaskEvent to Manager type=ACK taskUID=xxx-xxx-xxx
+✅ [MQTT] Task dispatched successfully taskUID=xxx-xxx-xxx robot=robot-debug-001 topic=k8s4r/robots/robot-debug-001/tasks/dispatch
+📤 [GRPC STREAM] Sent TaskEvent to Manager type=PUBLISHED taskUID=xxx-xxx-xxx
+```
+
+**Agent 日志 (Terminal 4) 应该显示**:
+```
+📥 [MQTT] Received task taskUID=xxx-xxx-xxx
+▶️  Starting task taskUID=xxx-xxx-xxx command=sleep 3 && echo 'Task completed via gRPC Stream'
+📤 [MQTT] Published task status state=running taskUID=xxx-xxx-xxx
+[3秒后]
+✅ Task completed taskUID=xxx-xxx-xxx exitCode=0
+📤 [MQTT] Published task status state=exited exitCode=0
+```
+
+**Server 收到状态后上报 (Terminal 3)**:
+```
+📥 [MQTT] Received task status taskUID=xxx-xxx-xxx state=running
+✅ [GRPC] Task status reported to Manager success=true
+
+📥 [MQTT] Received task status taskUID=xxx-xxx-xxx state=exited
+✅ [GRPC] Task status reported to Manager success=true
+```
+
+**Manager 更新状态 (Terminal 2)**:
+```
+📊 [TASK CONTROLLER] Task state updated task=grpc-test-job-concurrent-tasks-0 state=running
+📊 [TASK CONTROLLER] Task exited exitCode=0
+✅ [TASK CONTROLLER] Task completed successfully task=grpc-test-job-concurrent-tasks-0
+```
+
+---
+
+### 步骤 8: 验证任务执行结果
+
+```bash
+# 查看 Job 状态
+kubectl get jobs
+
+# 查看 TaskGroup
+kubectl get taskgroups
+
+# 查看 Task（应该有 2 个）
+kubectl get tasks
+
+# 期望输出：
+# NAME                                STATE       TARGET ROBOT       AGE
+# grpc-test-job-concurrent-tasks-0    Completed   robot-debug-001    1m
+# grpc-test-job-concurrent-tasks-1    Completed   robot-debug-001    1m
+
+# 查看 Task 详情
+kubectl describe task grpc-test-job-concurrent-tasks-0
+```
+
+**应该看到**:
+```yaml
+Spec:
+  Driver: exec
+  Job Name: grpc-test-job
+  Target Robot: robot-debug-001
+  Config:
+    command: sleep 3 && echo 'Task completed via gRPC Stream'
+Status:
+  State: Completed
+  Exit Code: 0
+  Message: Task completed successfully
+  Started At: 2025-11-21T17:45:00Z
+  Finished At: 2025-11-21T17:45:03Z
+```
+
+---
+
+### 🔍 关键验证点总结
+
+| 组件 | 验证内容 | 期望结果 |
+|------|---------|----------|
+| **Manager** | gRPC Server 监听 9090 | ✅ 端口打开 |
+| **Server** | 连接到 Manager gRPC | ✅ 连接成功 |
+| **Server** | StreamTasks 初始化 | ✅ 双向流建立 |
+| **Server** | 连接到 MQTT Broker | ✅ 连接成功 |
+| **Server** | 订阅 MQTT topics | ✅ 订阅 3 个 topic |
+| **Agent** | 注册消息发送 | ✅ MQTT publish |
+| **Server** | 注册消息转发 | ✅ gRPC ReportRegistration |
+| **Manager** | 创建 Robot 资源 | ✅ Robot phase=Online |
+| **Server** | 响应消息回复 | ✅ MQTT publish response |
+| **Agent** | 收到注册成功 | ✅ Registration successful |
+| **Manager** | Task 推送到 Stream | ✅ stream.Send(TaskCommand) |
+| **Server** | 接收 TaskCommand | ✅ stream.Recv() |
+| **Server** | 转发到 MQTT | ✅ MQTT publish dispatch |
+| **Agent** | 接收并执行任务 | ✅ 执行完成 |
+| **Agent** | 状态上报 MQTT | ✅ MQTT publish status |
+| **Server** | 状态转发 gRPC | ✅ ReportTaskStatus |
+| **Manager** | 更新 Task 状态 | ✅ State=Completed |
+
+---
+
+### 📊 消息流验证
+
+**完整的消息流应该是**:
+
+```
+1. Agent 注册:
+   Agent --MQTT register--> Server --gRPC ReportRegistration--> Manager --K8s--> Create Robot
+   Manager --gRPC Response--> Server --MQTT response--> Agent
+
+2. Agent 心跳:
+   Agent --MQTT heartbeat--> Server --gRPC ReportHeartbeat--> Manager --K8s--> Update Robot.LastHeartbeat
+
+3. 任务分发:
+   kubectl create Job --> Manager Controller --> Create Task
+   Manager --gRPC stream.Send(TaskCommand)--> Server
+   Server --gRPC stream.Send(TaskEvent.ACK)--> Manager
+   Server --MQTT dispatch--> Agent
+   Server --gRPC stream.Send(TaskEvent.PUBLISHED)--> Manager
+
+4. 状态上报:
+   Agent --MQTT status--> Server --gRPC ReportTaskStatus--> Manager --K8s--> Update Task.Status
+```
+
+---
+
+### 🐛 常见问题排查
+
+**问题 1: Server 无法连接 Manager**
+```bash
+# 检查 Manager 是否启动
+lsof -i :9090
+
+# 检查防火墙
+telnet localhost 9090
+
+# 查看 Manager 日志
+# 应该看到 "gRPC server listening"
+```
+
+**问题 2: Agent 注册超时**
+```bash
+# 检查 Server 是否订阅了 register topic
+# Server 日志应该显示 "Subscribed to MQTT topics"
+
+# 监控 MQTT 消息
+mosquitto_sub -h localhost -t 'k8s4r/#' -v
+
+# 检查 response topic
+mosquitto_sub -h localhost -t 'k8s4r/robots/robot-debug-001/response' -v
+```
+
+**问题 3: 任务未分发到 Agent**
+```bash
+# 检查 Manager 是否推送到 Stream
+grep "GRPC STREAM.*Pushing" manager.log
+
+# 检查 Server 是否接收
+grep "Received CREATE_TASK" server.log
+
+# 检查 MQTT 分发
+mosquitto_sub -h localhost -t 'k8s4r/robots/+/tasks/dispatch' -v
+```
+
+**问题 4: 任务状态未更新**
+```bash
+# 检查 Agent 是否发送状态
+# Agent 日志应该显示 "Published task status"
+
+# 检查 Server 是否转发
+grep "Task status reported to Manager" server.log
+
+# 检查 K8s Task 资源
+kubectl get tasks -w
+```
+
+---
+
+### 🎯 测试成功标志
+
+全部测试通过后，你应该看到：
+
+1. **Manager**:
+   - ✅ gRPC Server 运行在 9090 端口
+   - ✅ 接收 Server 的 gRPC 连接
+   - ✅ StreamTasks 双向流工作正常
+   - ✅ 处理 Unary RPC (Registration, Heartbeat, TaskStatus)
+
+2. **Server**:
+   - ✅ 无任何 Kubernetes 依赖
+   - ✅ 成功连接 Manager gRPC 和 MQTT Broker
+   - ✅ 双向转发：MQTT ↔ gRPC
+   - ✅ 任务分发和状态上报正常
+
+3. **Agent**:
+   - ✅ 通过 MQTT 成功注册
+   - ✅ 收到注册响应
+   - ✅ 定期发送心跳
+   - ✅ 接收并执行任务
+   - ✅ 上报任务状态
+
+4. **Kubernetes**:
+   - ✅ Robot 资源自动创建，phase=Online
+   - ✅ Job 创建后自动生成 TaskGroup 和 Task
+   - ✅ Task 状态正确更新（Pending → Dispatching → Running → Completed）
+
+**整个流程验证了 gRPC 双向流架构的核心价值**:
+- ✅ Server 完全解耦 Kubernetes，可独立部署
+- ✅ Manager 通过 gRPC Stream 实时推送任务
+- ✅ 双向流通信效率高，无需轮询
+- ✅ MQTT + gRPC 混合架构工作正常
+
+---
+
+### 清理测试资源
+
+测试完成后清理：
+
+```bash
+# 删除测试资源
+kubectl delete job grpc-test-job
+kubectl delete taskgroups --all
+kubectl delete tasks --all
+kubectl delete robot robot-debug-001
+
+# 停止组件 (Ctrl+C)
+# Terminal 2: Manager
+# Terminal 3: Server
+# Terminal 4: Agent
+
+# 停止 MQTT Broker
+./config/mosquitto/start-mosquitto.sh stop
 ```
 
 ---

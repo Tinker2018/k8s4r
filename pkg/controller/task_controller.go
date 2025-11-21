@@ -22,13 +22,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndg/k8s4r/pkg/manager"
 )
 
 // TaskReconciler reconciles a Task object
 // 负责调度 Task 到 Robot 并监控状态
 type TaskReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme            *runtime.Scheme
+	TaskStreamManager *manager.TaskStreamManager
 }
 
 //+kubebuilder:rbac:groups=robot.k8s4r.io,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -162,10 +164,24 @@ func (r *TaskReconciler) scheduleTask(ctx context.Context, task *robotv1alpha1.T
 		"robot", selectedRobot.Name)
 
 	// 状态保持 pending，等待 Server 分发
+	// 通过 gRPC Stream 推送到 Server
+	if r.TaskStreamManager != nil {
+		if err := r.TaskStreamManager.PushTaskToStream(ctx, task); err != nil {
+			logger.Error(err, "Failed to push task to stream")
+			// 不返回错误，让任务保持 pending，下次 reconcile 会重试
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
 // selectRobotsByLabels 根据 label selector 选择 Robot
+// ========== 设计原则 ==========
+// Task 分配只看 label 匹配，不检查 Robot 是否在线
+// 原因：
+// 1. 避免缓存一致性问题
+// 2. 允许离线 Robot 积压任务，上线后立即执行
+// 3. 如果需要只分配给在线 Robot，应该在 Job 层面通过 label selector 控制
 func (r *TaskReconciler) selectRobotsByLabels(ctx context.Context, selector map[string]string) ([]*robotv1alpha1.Robot, error) {
 	logger := log.FromContext(ctx)
 
@@ -177,22 +193,19 @@ func (r *TaskReconciler) selectRobotsByLabels(ctx context.Context, selector map[
 
 	var matchedRobots []*robotv1alpha1.Robot
 
-	// 遍历所有 Robot，检查 label 是否匹配
+	// 遍历所有 Robot，只检查 label 是否匹配（不检查在线状态）
 	for i := range robotList.Items {
 		robot := &robotList.Items[i]
-
-		// 只考虑 Online 的 Robot
-		if robot.Status.Phase != robotv1alpha1.RobotPhaseOnline {
-			continue
-		}
 
 		// 检查所有 selector label 是否匹配
 		if matchesLabels(robot.Spec.Labels, selector) {
 			matchedRobots = append(matchedRobots, robot)
-			logger.Info("Robot matched selector",
+			logger.Info("🎯 [TASK SCHEDULING] Robot matched selector",
 				"robot", robot.Name,
 				"robotLabels", robot.Spec.Labels,
-				"selector", selector)
+				"selector", selector,
+				"phase", robot.Status.Phase,
+				"note", "Task will be assigned regardless of online status")
 		}
 	}
 
