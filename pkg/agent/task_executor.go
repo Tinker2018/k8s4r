@@ -16,13 +16,15 @@ import (
 
 // TaskExecutor 负责在 Agent 端执行任务
 type TaskExecutor struct {
-	robotName  string
-	mqttClient mqtt.Client
-	driver     driver.TaskDriver
-	tasks      map[string]*runningTask
-	tasksMu    sync.RWMutex
-	logger     Logger
-	workDir    string
+	robotName   string
+	mqttClient  mqtt.Client
+	driver      driver.TaskDriver
+	tasks       map[string]*runningTask
+	tasksMu     sync.RWMutex
+	logger      Logger
+	workDir     string
+	monitorStop chan struct{} // 用于停止 monitor 协程
+	monitorOnce sync.Once     // 确保 monitor 只启动一次
 }
 
 // runningTask 代表一个运行中的任务
@@ -31,6 +33,7 @@ type runningTask struct {
 	handle     *driver.TaskHandle
 	cancelFunc context.CancelFunc
 	stopChan   chan struct{}
+	startTime  time.Time // 任务启动时间，用于超时检测
 }
 
 // TaskMessage 从 Manager 接收的任务消息
@@ -89,12 +92,13 @@ func NewTaskExecutor(robotName string, mqttClient mqtt.Client, workDir string, l
 	logger.Info("task executor initialized", "workDir", workDir)
 
 	te := &TaskExecutor{
-		robotName:  robotName,
-		mqttClient: mqttClient,
-		driver:     taskDriver,
-		tasks:      make(map[string]*runningTask),
-		logger:     logger,
-		workDir:    workDir,
+		robotName:   robotName,
+		mqttClient:  mqttClient,
+		driver:      taskDriver,
+		tasks:       make(map[string]*runningTask),
+		logger:      logger,
+		workDir:     workDir,
+		monitorStop: make(chan struct{}),
 	}
 
 	// 设置驱动的事件回调，用于上报执行阶段
@@ -109,7 +113,7 @@ func NewTaskExecutor(robotName string, mqttClient mqtt.Client, workDir string, l
 func (te *TaskExecutor) Start(ctx context.Context) error {
 	// 1. 首先订阅任务状态恢复 topic（retained message）
 	// 这个 topic 记录了分配给这个 robot 的所有未完成任务
-	stateTopic := fmt.Sprintf("robots/%s/tasks/state", te.robotName)
+	stateTopic := fmt.Sprintf("k8s4r/robots/%s/tasks/state", te.robotName)
 	te.logger.Info("subscribing to task state topic for recovery", "topic", stateTopic)
 
 	// 使用 channel 等待状态恢复完成
@@ -138,7 +142,7 @@ func (te *TaskExecutor) Start(ctx context.Context) error {
 	}
 
 	// 2. 订阅任务分发 topic
-	dispatchTopic := fmt.Sprintf("robots/%s/tasks/dispatch", te.robotName)
+	dispatchTopic := fmt.Sprintf("k8s4r/robots/%s/tasks/dispatch", te.robotName)
 	te.logger.Info("subscribing to task dispatch topic", "topic", dispatchTopic)
 
 	token = te.mqttClient.Subscribe(dispatchTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
@@ -151,6 +155,10 @@ func (te *TaskExecutor) Start(ctx context.Context) error {
 	}
 
 	te.logger.Info("task executor started successfully")
+
+	// 启动统一的任务监控协程（只启动一次）
+	te.startMonitor(ctx)
+
 	return nil
 }
 
@@ -267,6 +275,7 @@ func (te *TaskExecutor) createTask(ctx context.Context, task *robotv1alpha1.Task
 		handle:     handle,
 		cancelFunc: cancel,
 		stopChan:   make(chan struct{}),
+		startTime:  time.Now(), // 记录启动时间
 	}
 
 	te.tasksMu.Lock()
@@ -278,84 +287,160 @@ func (te *TaskExecutor) createTask(ctx context.Context, task *robotv1alpha1.Task
 
 	te.logger.Info("task started successfully", "taskUID", taskUID, "pid", handle.PID)
 
-	// 启动状态监控协程
-	go te.monitorTask(taskCtx, rt)
+	// 注意：不再为每个任务启动单独的 monitor 协程
+	// 统一的 monitor 协程会轮询所有任务
 }
 
-// monitorTask 监控任务状态并周期性上报
-func (te *TaskExecutor) monitorTask(ctx context.Context, rt *runningTask) {
-	taskUID := string(rt.task.UID)
+// startMonitor 启动统一的任务监控协程（只启动一次）
+func (te *TaskExecutor) startMonitor(ctx context.Context) {
+	te.monitorOnce.Do(func() {
+		go te.monitorAllTasks(ctx)
+	})
+}
+
+// monitorAllTasks 监控所有任务的状态和超时（单个协程）
+func (te *TaskExecutor) monitorAllTasks(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	te.logger.Info("starting task monitor", "taskUID", taskUID)
+	te.logger.Info("starting unified task monitor")
 
 	for {
 		select {
 		case <-ctx.Done():
-			te.logger.Info("task monitor stopped by context", "taskUID", taskUID)
+			te.logger.Info("task monitor stopped by context")
 			return
 
-		case <-rt.stopChan:
-			te.logger.Info("task monitor stopped", "taskUID", taskUID)
+		case <-te.monitorStop:
+			te.logger.Info("task monitor stopped")
 			return
 
 		case <-ticker.C:
-			// 获取任务状态
-			status, err := te.driver.Status(ctx, rt.handle)
-			if err != nil {
-				te.logger.Error("failed to get task status", "taskUID", taskUID, "error", err)
-				continue
+			// 获取所有任务的快照
+			te.tasksMu.RLock()
+			tasks := make([]*runningTask, 0, len(te.tasks))
+			for _, rt := range te.tasks {
+				tasks = append(tasks, rt)
 			}
+			te.tasksMu.RUnlock()
 
-			// 映射驱动状态到 Task 状态
-			taskState := "running"
-			exitCode := 0
-			message := "Task is running"
-
-			switch status.State {
-			case driver.TaskStateRunning:
-				taskState = "running"
-				message = "Task is running"
-			case driver.TaskStateExited:
-				if status.ExitCode == 0 {
-					taskState = "completed"
-					message = "Task completed successfully"
-				} else {
-					taskState = "failed"
-					message = fmt.Sprintf("Task failed with exit code %d", status.ExitCode)
-				}
-				exitCode = status.ExitCode
-			case driver.TaskStateFailed:
-				taskState = "failed"
-				message = status.Message
-				exitCode = status.ExitCode
-			}
-
-			// 周期性上报状态（让 Manager 知道任务还在运行）
-			te.reportStatus(taskUID, taskState, exitCode, message, status.Resources)
-
-			te.logger.Debug("reported task status",
-				"taskUID", taskUID,
-				"state", taskState,
-				"exitCode", exitCode)
-
-			// 如果任务已结束，停止监控
-			if status.State == driver.TaskStateExited || status.State == driver.TaskStateFailed {
-				te.logger.Info("task finished", "taskUID", taskUID, "state", taskState, "exitCode", exitCode)
-
-				// 清理任务
-				te.tasksMu.Lock()
-				delete(te.tasks, taskUID)
-				te.tasksMu.Unlock()
-
-				// 更新 MQTT state（移除已完成的任务）
-				te.updateMQTTState()
-
-				return
+			// 逐个检查任务状态
+			for _, rt := range tasks {
+				te.checkTask(ctx, rt)
 			}
 		}
 	}
+}
+
+// checkTask 检查单个任务的状态和超时
+func (te *TaskExecutor) checkTask(ctx context.Context, rt *runningTask) {
+	taskUID := string(rt.task.UID)
+
+	// 1. 检查超时
+	if rt.task.Spec.Timeout != nil {
+		timeout := rt.task.Spec.Timeout.Duration
+		if time.Since(rt.startTime) > timeout {
+			te.logger.Info("task timeout detected, terminating",
+				"taskUID", taskUID,
+				"timeout", timeout,
+				"elapsed", time.Since(rt.startTime))
+
+			// 超时，强制终止任务
+			te.terminateTask(ctx, rt, "Task timeout")
+			return
+		}
+	}
+
+	// 2. 获取任务状态
+	status, err := te.driver.Status(ctx, rt.handle)
+	if err != nil {
+		te.logger.Error("failed to get task status", "taskUID", taskUID, "error", err)
+		return
+	}
+
+	// 3. 映射驱动状态到 Task 状态
+	taskState := "running"
+	exitCode := 0
+	message := "Task is running"
+
+	switch status.State {
+	case driver.TaskStateRunning:
+		taskState = "running"
+		message = "Task is running"
+	case driver.TaskStateExited:
+		if status.ExitCode == 0 {
+			taskState = "completed"
+			message = "Task completed successfully"
+		} else {
+			taskState = "failed"
+			message = fmt.Sprintf("Task failed with exit code %d", status.ExitCode)
+		}
+		exitCode = status.ExitCode
+	case driver.TaskStateFailed:
+		taskState = "failed"
+		message = status.Message
+		exitCode = status.ExitCode
+	}
+
+	// 4. 周期性上报状态（让 Manager 知道任务还在运行）
+	te.reportStatus(taskUID, taskState, exitCode, message, status.Resources)
+
+	te.logger.Debug("reported task status",
+		"taskUID", taskUID,
+		"state", taskState,
+		"exitCode", exitCode)
+
+	// 5. 如果任务已结束，清理任务
+	if status.State == driver.TaskStateExited || status.State == driver.TaskStateFailed {
+		te.logger.Info("task finished", "taskUID", taskUID, "state", taskState, "exitCode", exitCode)
+
+		// 清理任务
+		te.tasksMu.Lock()
+		delete(te.tasks, taskUID)
+		te.tasksMu.Unlock()
+
+		// 关闭 stopChan（通知其他可能在等待的协程）
+		close(rt.stopChan)
+		rt.cancelFunc()
+
+		// 更新 MQTT state（移除已完成的任务）
+		te.updateMQTTState()
+	}
+}
+
+// terminateTask 终止超时或需要强制停止的任务
+func (te *TaskExecutor) terminateTask(ctx context.Context, rt *runningTask, reason string) {
+	taskUID := string(rt.task.UID)
+
+	te.logger.Info("terminating task", "taskUID", taskUID, "reason", reason)
+
+	// 上报超时状态
+	te.reportStatusWithEvent(taskUID, "failed", -1,
+		fmt.Sprintf("Task terminated: %s", reason), "Timeout", nil)
+
+	// 停止任务
+	if err := te.driver.Stop(ctx, rt.handle); err != nil {
+		te.logger.Error("failed to stop task", "taskUID", taskUID, "error", err)
+	}
+
+	// 销毁任务
+	if err := te.driver.Destroy(ctx, rt.handle); err != nil {
+		te.logger.Error("failed to destroy task", "taskUID", taskUID, "error", err)
+	}
+
+	// 清理任务
+	te.tasksMu.Lock()
+	delete(te.tasks, taskUID)
+	te.tasksMu.Unlock()
+
+	// 关闭 stopChan
+	close(rt.stopChan)
+	rt.cancelFunc()
+
+	// 更新 MQTT state
+	te.updateMQTTState()
+
+	te.logger.Info("task terminated", "taskUID", taskUID)
 }
 
 // deleteTask 删除任务
@@ -416,7 +501,7 @@ func (te *TaskExecutor) reportStatusWithEvent(taskUID, state string, exitCode in
 	}
 
 	// 发送到状态上报 topic
-	topic := fmt.Sprintf("robots/%s/tasks/%s/status", te.robotName, taskUID)
+	topic := fmt.Sprintf("k8s4r/robots/%s/tasks/%s/status", te.robotName, taskUID)
 
 	token := te.mqttClient.Publish(topic, 1, false, payload)
 	token.Wait()
@@ -450,7 +535,7 @@ func (te *TaskExecutor) updateMQTTState() {
 	}
 
 	// 发布到 state topic，使用 retained=true 保存状态
-	stateTopic := fmt.Sprintf("robots/%s/tasks/state", te.robotName)
+	stateTopic := fmt.Sprintf("k8s4r/robots/%s/tasks/state", te.robotName)
 
 	// 如果没有任务，发送空消息清除 retained message
 	if len(tasks) == 0 {
@@ -469,6 +554,9 @@ func (te *TaskExecutor) updateMQTTState() {
 // Stop 停止任务执行器
 func (te *TaskExecutor) Stop(ctx context.Context) error {
 	te.logger.Info("stopping task executor")
+
+	// 停止 monitor 协程
+	close(te.monitorStop)
 
 	// 停止所有运行中的任务
 	te.tasksMu.Lock()

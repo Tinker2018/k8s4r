@@ -60,6 +60,11 @@ type TaskSpec struct {
 	// +optional
 	User string `json:"user,omitempty"`
 
+	// Timeout 指定任务执行的总超时时间（从启动到完成）
+	// 超过此时间任务将被强制终止
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
 	// KillTimeout 指定强制终止任务的超时时间
 	// +optional
 	KillTimeout *metav1.Duration `json:"killTimeout,omitempty"`

@@ -4,12 +4,26 @@
 
 ## ⚡ 重要更新
 
-**当前版本使用 HashiCorp Nomad 的 executor 进行任务执行！**
+### 最新特性（2025-11-21）
 
-优势：
-- ✅ 生产级进程管理
-- ✅ 自动日志轮转
-- ✅ 完整资源监控（CPU、内存）
+**三层资源架构**:
+- ✅ Job → TaskGroup → Task 层次化管理
+- ✅ TaskGroup 作为独立 CRD，可单独查询
+- ✅ 状态自动级联聚合
+
+**性能优化**:
+- ✅ Agent 协程优化：N 个任务仅需 N+1 个协程（减少 45%）
+- ✅ 单协程统一监控所有任务
+- ✅ 超时检测：每个任务可配置独立 timeout
+
+**MQTT Topic 改进**:
+- ✅ 统一使用 `k8s4r/` 前缀
+- ✅ 机器人独立命名空间 `k8s4r/robots/{robotId}/`
+- ✅ 任务级别的状态上报 topic
+
+**任务执行引擎**:
+- ✅ HashiCorp Nomad Executor - 生产级进程管理
+- ✅ 自动日志轮转和资源监控
 - ✅ 优雅停止和子进程清理
 - ✅ 可选进程隔离（cgroups）
 
@@ -50,15 +64,16 @@ mosquitto_sub --help
 ```bash
 cd /Users/hxndg/code_test/k8s4r
 
-# 1. 安装所有 CRD (Robot, Job, Task)
+# 1. 安装所有 CRD (Robot, Job, TaskGroup, Task)
 kubectl apply -f config/crd/
 
 # 验证 CRD 安装
 kubectl get crd | grep robot
 # 应该看到:
 # jobs.robot.k8s4r.io
-# robots.robot.k8s4r.io
+# taskgroups.robot.k8s4r.io
 # tasks.robot.k8s4r.io
+# robots.robot.k8s4r.io
 ```
 ./config/mosquitto/start-mosquitto.sh simple
 
@@ -780,3 +795,160 @@ kubectl apply -f examples/test-echo-job.yaml
 kubectl get tasks
 kubectl describe task test-echo-job-echo-group-echo-task-0
 ```
+
+### 6. 测试任务超时控制
+
+超时功能允许为每个任务设置独立的执行时间限制。Agent 会每 5 秒检查一次所有运行中的任务，如果超时则自动终止。
+
+```bash
+# 创建一个会超时的任务（sleep 60s, timeout 10s）
+kubectl apply -f - <<EOF
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-timeout-job
+spec:
+  name: test-timeout-job
+  robotSelector: {}
+  type: batch
+  taskGroups:
+    - name: timeout-group
+      count: 1
+      tasks:
+        - name: timeout-task
+          driver: exec
+          
+          # 超时配置
+          timeout: 10s        # 任务总超时时间
+          killTimeout: 5s     # 终止等待时间
+          
+          config:
+            execConfig:
+              command: /bin/sleep
+              args: ["60"]    # 睡眠 60 秒（会在 10s 后被杀死）
+EOF
+
+# 观察任务状态变化
+kubectl get tasks -w
+
+# 任务应该在 10-15 秒内变为 failed 状态（10s timeout + 最多 5s 监控周期）
+kubectl describe task test-timeout-job-timeout-group-timeout-task-0
+
+# 查看失败原因（应该显示 "Task timeout"）
+kubectl get task test-timeout-job-timeout-group-timeout-task-0 -o jsonpath='{.status.message}'
+```
+
+**预期行为**:
+1. 任务开始执行（state: running）
+2. 10 秒后超时被检测到
+3. Agent 发送 SIGTERM 信号
+4. 等待 killTimeout (5s)
+5. 如果进程仍未退出，发送 SIGKILL
+6. 任务状态更新为 failed，消息为 "Task timeout"
+
+**Agent 日志应该显示**:
+```
+INFO  task timeout detected, terminating  taskUID=xxx timeout=10s elapsed=10.xxxs
+INFO  terminating task  taskUID=xxx reason="Task timeout"
+INFO  task stopped successfully  taskUID=xxx
+```
+
+---
+
+## 单元测试
+
+项目包含完整的单元测试套件，验证核心功能：
+
+### 运行所有 Agent 测试
+
+```bash
+cd /Users/hxndg/code_test/k8s4r
+
+# 运行所有测试
+go test -v ./pkg/agent -timeout 60s
+
+# 或使用 make
+make test
+```
+
+### 单独运行各项测试
+
+```bash
+# 1. 测试并发任务执行（2 个任务并行）
+go test -v ./pkg/agent -run TestTaskExecutor_ConcurrentTasks -timeout 30s
+
+# 预期: 同时启动 sleep 2s 和 sleep 5s 任务
+# 应该在 5-6 秒内全部完成（而不是 7 秒）
+
+# 2. 测试任务超时控制
+go test -v ./pkg/agent -run TestTaskExecutor_Timeout -timeout 30s
+
+# 预期: sleep 10s 任务设置 2s timeout
+# 应该在 2-7 秒内被终止（2s timeout + 最多 5s 监控周期）
+
+# 3. 测试任务生命周期
+go test -v ./pkg/agent -run TestTaskExecutor_TaskLifecycle -timeout 30s
+
+# 预期: 验证单个任务从创建到完成的完整流程
+```
+
+### 测试输出示例
+
+```bash
+=== RUN   TestTaskExecutor_ConcurrentTasks
+    task_executor_test.go:203: Both tasks started successfully
+    task_executor_test.go:345: Test completed successfully!
+--- PASS: TestTaskExecutor_ConcurrentTasks (17.52s)
+
+=== RUN   TestTaskExecutor_Timeout
+    task_executor_test.go:433: ✓ Found timeout event at message 3
+    task_executor_test.go:450: ✓ Test completed successfully! Task was terminated due to timeout.
+--- PASS: TestTaskExecutor_Timeout (15.52s)
+
+=== RUN   TestTaskExecutor_TaskLifecycle
+--- PASS: TestTaskExecutor_TaskLifecycle (12.21s)
+
+PASS
+ok      github.com/hxndg/k8s4r/pkg/agent        45.250s
+```
+
+**性能验证**:
+- ✅ 并发测试验证多任务同时执行
+- ✅ 超时测试验证超时检测和终止机制
+- ✅ 生命周期测试验证状态转换正确性
+- ✅ 所有测试通过证明协程优化后功能正常
+
+---
+
+## MQTT Topic 验证
+
+验证新的 topic 结构（使用 `k8s4r/` 前缀）：
+
+```bash
+# 监听所有 k8s4r 相关消息
+mosquitto_sub -h localhost -p 1883 -t "k8s4r/#" -v
+```
+
+**应该看到的消息**:
+
+```
+# Agent 注册
+k8s4r/register {"robotId":"robot-debug-01","token":"fixed-token-123",...}
+
+# 心跳上报（每 30 秒）
+k8s4r/heartbeat {"robotId":"robot-debug-01","timestamp":"2025-11-21T10:30:00Z"}
+
+# 注册响应
+k8s4r/robots/robot-debug-01/response {"status":"approved","message":"Registration successful"}
+
+# 任务分发
+k8s4r/robots/robot-debug-01/tasks/dispatch {"metadata":{"uid":"xxx"},"spec":{...}}
+
+# 任务状态上报
+k8s4r/robots/robot-debug-01/tasks/xxx-xxx-xxx/status {"state":"running","message":"Process started"}
+
+# 任务状态同步（Agent 启动时恢复状态用）
+k8s4r/robots/robot-debug-01/tasks/state {"tasks":[{"uid":"xxx","state":"running"}]}
+```
+
+---

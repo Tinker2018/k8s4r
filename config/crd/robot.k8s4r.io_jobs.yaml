@@ -92,11 +92,11 @@ spec:
                   只有匹配所有 label 的 Robot 才会被选中执行此 Job
                 type: object
               taskGroups:
-                description: TaskGroups 定义任务组列表
+                description: TaskGroups 定义任务组模板列表
                 items:
                   description: |-
-                    TaskGroup 定义任务组
-                    同一个 TaskGroup 中的 Task 会被调度到同一个 Robot 上
+                    TaskGroupTemplate 定义任务组模板（在 Job Spec 中使用）
+                    JobController 会根据这个模板创建实际的 TaskGroup CRD
                   properties:
                     constraints:
                       description: Constraints 任务组级别的约束

@@ -50,10 +50,14 @@ type Response struct {
 
 // MQTT Topics (与server保持一致)
 const (
+	// 全局 Topics（Agent → Server）
 	TopicRegister  = "k8s4r/register"
 	TopicHeartbeat = "k8s4r/heartbeat"
-	TopicResponse  = "k8s4r/response"
-	TopicCommands  = "k8s4r/commands"
+
+	// 机器人专属 Topics（格式化字符串，需要填入robotId）
+	TopicRobotResponse     = "k8s4r/robots/%s/response"       // 接收Server响应
+	TopicRobotTaskDispatch = "k8s4r/robots/%s/tasks/dispatch" // 接收任务分发
+	TopicRobotTaskState    = "k8s4r/robots/%s/tasks/state"    // 任务状态恢复（retained消息）
 )
 
 // Agent 结构体
@@ -155,17 +159,15 @@ func (a *Agent) setupMQTT() error {
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		log.Printf("Connected to MQTT broker: %s", a.BrokerURL)
 
-		// 订阅响应主题
-		responseTopic := fmt.Sprintf("%s/%s", TopicResponse, a.RobotID)
+		// 订阅机器人专属的响应 topic
+		responseTopic := fmt.Sprintf(TopicRobotResponse, a.RobotID)
 		if token := client.Subscribe(responseTopic, 1, a.handleResponse); token.Wait() && token.Error() != nil {
 			log.Printf("Failed to subscribe to response topic: %v", token.Error())
+		} else {
+			log.Printf("Subscribed to response topic: %s", responseTopic)
 		}
 
-		// 订阅命令主题
-		commandTopic := fmt.Sprintf("%s/%s", TopicCommands, a.RobotID)
-		if token := client.Subscribe(commandTopic, 1, a.handleCommand); token.Wait() && token.Error() != nil {
-			log.Printf("Failed to subscribe to command topic: %v", token.Error())
-		}
+		// 注意：任务分发和状态恢复的订阅由 TaskExecutor 处理
 	})
 
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
@@ -189,18 +191,14 @@ func (a *Agent) handleResponse(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
+	log.Printf("Received response: success=%v, message=%s", response.Success, response.Message)
+
 	// 将响应发送到通道
 	select {
 	case a.responseChan <- response:
 	default:
 		log.Printf("Response channel is full, dropping response")
 	}
-}
-
-// handleCommand 处理服务器命令
-func (a *Agent) handleCommand(client mqtt.Client, msg mqtt.Message) {
-	log.Printf("Received command: %s", string(msg.Payload()))
-	// 这里可以添加具体的命令处理逻辑
 }
 
 // Run 运行 Agent

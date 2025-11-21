@@ -38,10 +38,10 @@ type JobSpec struct {
 	// +kubebuilder:validation:Maximum=100
 	Priority *int32 `json:"priority,omitempty"`
 
-	// TaskGroups 定义任务组列表
+	// TaskGroups 定义任务组模板列表
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
-	TaskGroups []TaskGroup `json:"taskGroups"`
+	TaskGroups []TaskGroupTemplate `json:"taskGroups"`
 
 	// Meta 元数据
 	// +optional
@@ -62,9 +62,9 @@ const (
 	JobTypeSystem JobType = "system"
 )
 
-// TaskGroup 定义任务组
-// 同一个 TaskGroup 中的 Task 会被调度到同一个 Robot 上
-type TaskGroup struct {
+// TaskGroupTemplate 定义任务组模板（在 Job Spec 中使用）
+// JobController 会根据这个模板创建实际的 TaskGroup CRD
+type TaskGroupTemplate struct {
 	// Name 任务组名称
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`

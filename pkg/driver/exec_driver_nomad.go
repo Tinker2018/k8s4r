@@ -75,16 +75,17 @@ func (d *NomadExecDriver) SetEventCallback(callback EventCallback) {
 	d.eventCallback = callback
 }
 
-// emitEvent 触发事件回调
+// emitEvent 触发事件回调（调用者必须已持有锁或在锁外调用）
 func (d *NomadExecDriver) emitEvent(taskUID, event, message string) {
-	d.mu.RLock()
+	// 注意：这里不获取锁，因为通常从已持有锁的方法中调用
+	// 如果callback为nil，直接返回避免panic
 	callback := d.eventCallback
-	d.mu.RUnlock()
 
 	d.logger.Info("emitting event", "taskUID", taskUID, "event", event, "message", message)
 
 	if callback != nil {
-		callback(taskUID, event, message)
+		// 异步调用callback，避免阻塞主流程和潜在的死锁
+		go callback(taskUID, event, message)
 	} else {
 		d.logger.Warn("event callback is nil, event not sent", "event", event)
 	}

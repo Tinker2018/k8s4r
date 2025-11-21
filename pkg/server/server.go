@@ -27,17 +27,30 @@ import (
 )
 
 const (
-	// MQTT Topics
-	TopicRegister  = "k8s4r/register"  // Agent 注册
-	TopicHeartbeat = "k8s4r/heartbeat" // Agent 心跳
-	TopicResponse  = "k8s4r/response"  // Server 响应
+	// MQTT Topics 设计原则：
+	// 1. 所有 topic 以 k8s4r/ 开头
+	// 2. 每个机器人有独立的命名空间 k8s4r/robots/{robotId}/
+	// 3. 使用点对点通信，避免全局广播
 
-	// Task 相关
-	TopicTaskDispatch = "robots/%s/tasks/dispatch" // robots/{robotName}/tasks/dispatch
-	TopicTaskStatus   = "robots/+/tasks/+/status"  // robots/{robotName}/tasks/{taskUID}/status
+	// 全局 Topics（Agent → Server）
+	TopicRegister  = "k8s4r/register"  // Agent 注册请求
+	TopicHeartbeat = "k8s4r/heartbeat" // Agent 心跳上报
+
+	// 机器人专属 Topics（双向通信）
+	// Server → Agent（使用具体的 robotId）
+	TopicRobotResponse     = "k8s4r/robots/%s/response"       // Server 发送：k8s4r/robots/{robotId}/response
+	TopicRobotTaskDispatch = "k8s4r/robots/%s/tasks/dispatch" // Server 发送：k8s4r/robots/{robotId}/tasks/dispatch
+	TopicRobotTaskState    = "k8s4r/robots/%s/tasks/state"    // Server 发送：k8s4r/robots/{robotId}/tasks/state（retained消息，用于Agent重启恢复）
+
+	// Agent → Server（Server 使用通配符订阅，Agent 发布到具体 topic）
+	TopicRobotTaskStatus = "k8s4r/robots/+/tasks/+/status" // Server 订阅通配符，Agent 发送：k8s4r/robots/{robotId}/tasks/{taskUID}/status
 )
 
-// Server 是纯 MQTT 桥接层，只负责消息转发，不包含业务逻辑
+// Server MQTT 服务器，负责四个核心职责：
+// 0. 处理机器人的注册事件（MQTT → Kubernetes）
+// 1. 监听 Robot 的 heartbeat 事件，更新 Robot 心跳时间（MQTT → Kubernetes）
+// 2. 发布 Task 到 Robot 监听的 MQTT topic（Kubernetes → MQTT）
+// 3. 监听 Task 的处理状态，更新 Event 和 Task 状态到 Kubernetes（MQTT → Kubernetes）
 type Server struct {
 	Client     client.Client
 	Namespace  string
@@ -283,7 +296,7 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 		"message", statusMsg.Message)
 }
 
-// sendResponse 发送响应到 Agent
+// sendResponse 发送响应到 Agent（发送到机器人专属 topic）
 func (s *Server) sendResponse(robotID string, success bool, message string) {
 	logger := log.FromContext(s.ctx)
 
@@ -299,7 +312,8 @@ func (s *Server) sendResponse(robotID string, success bool, message string) {
 		return
 	}
 
-	topic := fmt.Sprintf("%s/%s", TopicResponse, robotID)
+	// 发送到机器人专属的 response topic
+	topic := fmt.Sprintf(TopicRobotResponse, robotID)
 	token := s.mqttClient.Publish(topic, 1, false, payload)
 	if token.Wait() && token.Error() != nil {
 		logger.Error(token.Error(), "Failed to publish response", "topic", topic)
@@ -309,7 +323,7 @@ func (s *Server) sendResponse(robotID string, success bool, message string) {
 // ===== K8s → MQTT 消息转发 =====
 
 // StartTaskWatcher 监听 Task 状态变化，转发到 MQTT
-// 当 Task.Status.State = "dispatching" 时触发转发
+// 当 Task.Status.State = "pending" 时触发转发，并更新为 "dispatching"
 func (s *Server) StartTaskWatcher(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting Task watcher")
@@ -336,8 +350,8 @@ func (s *Server) StartTaskWatcher(ctx context.Context) error {
 					task := &taskList.Items[i]
 					taskKey := string(task.UID)
 
-					// 如果状态是 dispatching 且未分发过，则转发到 MQTT
-					if task.Status.State == robotv1alpha1.TaskStateDispatching && !dispatchedTasks[taskKey] {
+					// 如果状态是 pending 且未分发过，则转发到 MQTT 并更新为 dispatching
+					if task.Status.State == robotv1alpha1.TaskStatePending && !dispatchedTasks[taskKey] {
 						if err := s.dispatchTaskToMQTT(ctx, task); err != nil {
 							logger.Error(err, "Failed to dispatch task to MQTT", "task", task.Name)
 						} else {
@@ -362,6 +376,7 @@ func (s *Server) StartTaskWatcher(ctx context.Context) error {
 }
 
 // dispatchTaskToMQTT 将 Task 通过 MQTT 转发给 Agent
+// 发送成功后，将 Task 状态从 pending 更新为 dispatching
 func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Task) error {
 	logger := log.FromContext(ctx)
 
@@ -380,8 +395,8 @@ func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Tas
 		return fmt.Errorf("failed to marshal task message: %w", err)
 	}
 
-	// 发送到目标 Robot
-	topic := fmt.Sprintf(TopicTaskDispatch, task.Spec.TargetRobot)
+	// 发送到目标 Robot 的专属 task dispatch topic
+	topic := fmt.Sprintf(TopicRobotTaskDispatch, task.Spec.TargetRobot)
 	token := s.mqttClient.Publish(topic, 1, false, payload)
 	token.Wait()
 	if err := token.Error(); err != nil {
@@ -392,6 +407,14 @@ func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Tas
 		"task", task.Name,
 		"robot", task.Spec.TargetRobot,
 		"topic", topic)
+
+	// 更新 Task 状态为 dispatching（表示已通过 MQTT 发送）
+	task.Status.State = robotv1alpha1.TaskStateDispatching
+	task.Status.Message = fmt.Sprintf("Dispatched to robot %s via MQTT", task.Spec.TargetRobot)
+	if err := s.Client.Status().Update(ctx, task); err != nil {
+		logger.Error(err, "Failed to update task status to dispatching", "task", task.Name)
+		// 不返回错误，因为消息已经发送成功
+	}
 
 	// 更新 Robot 的任务状态列表（用于 Agent 重启恢复）
 	if err := s.addTaskToRobotState(ctx, task); err != nil {
@@ -420,7 +443,8 @@ func (s *Server) deleteTaskViaMQTT(ctx context.Context, task *robotv1alpha1.Task
 		return fmt.Errorf("failed to marshal delete message: %w", err)
 	}
 
-	topic := fmt.Sprintf(TopicTaskDispatch, task.Spec.TargetRobot)
+	// 发送删除消息到机器人专属的 task dispatch topic
+	topic := fmt.Sprintf(TopicRobotTaskDispatch, task.Spec.TargetRobot)
 	token := s.mqttClient.Publish(topic, 1, false, payload)
 	token.Wait()
 	if err := token.Error(); err != nil {
@@ -498,12 +522,17 @@ func (s *Server) Start(ctx context.Context, brokerURL string) error {
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		logger.Info("Connected to MQTT broker")
 
-		// 订阅 Agent 消息
+		// 订阅全局 Topics（Agent → Server）
 		client.Subscribe(TopicRegister, 1, s.RegisterHandler)
 		client.Subscribe(TopicHeartbeat, 1, s.HeartbeatHandler)
-		client.Subscribe(TopicTaskStatus, 1, s.TaskStatusHandler)
 
-		logger.Info("Subscribed to MQTT topics")
+		// 订阅所有机器人的任务状态上报（使用通配符）
+		client.Subscribe(TopicRobotTaskStatus, 1, s.TaskStatusHandler)
+
+		logger.Info("Subscribed to MQTT topics",
+			"register", TopicRegister,
+			"heartbeat", TopicHeartbeat,
+			"taskStatus", TopicRobotTaskStatus)
 	})
 
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
@@ -584,7 +613,7 @@ func (s *Server) addTaskToRobotState(ctx context.Context, task *robotv1alpha1.Ta
 	logger.Info("State payload size", "bytes", len(payload))
 
 	// 发布到 state topic（使用 retained message）
-	stateTopic := fmt.Sprintf("robots/%s/tasks/state", task.Spec.TargetRobot)
+	stateTopic := fmt.Sprintf(TopicRobotTaskState, task.Spec.TargetRobot)
 	token := s.mqttClient.Publish(stateTopic, 1, true, payload) // retained=true
 	token.Wait()
 	if err := token.Error(); err != nil {

@@ -478,6 +478,11 @@ spec:
                   - destPath
                   type: object
                 type: array
+              timeout:
+                description: |-
+                  Timeout 指定任务执行的总超时时间（从启动到完成）
+                  超过此时间任务将被强制终止
+                type: string
               user:
                 description: User 指定运行任务的用户
                 type: string

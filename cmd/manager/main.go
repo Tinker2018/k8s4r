@@ -87,7 +87,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 设置 JobReconciler（负责根据 Job 创建 Task）
+	// 设置 TaskGroupReconciler（负责根据 TaskGroup 创建 Task）
+	if err = (&controller.TaskGroupReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TaskGroup")
+		os.Exit(1)
+	}
+
+	// 设置 JobReconciler（负责根据 Job 创建 TaskGroup）
 	if err = (&controller.JobReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
