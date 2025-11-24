@@ -20,8 +20,8 @@ spec:
     - jsonPath: .spec.type
       name: Type
       type: string
-    - jsonPath: .status.status
-      name: Status
+    - jsonPath: .status.state
+      name: State
       type: string
     - description: Total tasks
       jsonPath: .status.totalTasks
@@ -530,8 +530,8 @@ spec:
                 description: RunningTasks 运行中的任务数
                 format: int32
                 type: integer
-              status:
-                description: Status Job 整体状态
+              state:
+                description: State Job 当前状态
                 type: string
               statusDescription:
                 description: StatusDescription 状态描述
@@ -578,6 +578,16 @@ spec:
                   type: object
                 description: TaskGroupSummary 任务组状态摘要
                 type: object
+              taskGroups:
+                description: TaskGroups 关联的TaskGroup资源列表
+                items:
+                  type: string
+                type: array
+              tasks:
+                description: Tasks 关联的Task资源列表
+                items:
+                  type: string
+                type: array
               totalTasks:
                 description: TotalTasks 总任务数
                 format: int32

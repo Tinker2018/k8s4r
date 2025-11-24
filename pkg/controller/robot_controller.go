@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 // RobotReconciler reconciles a Robot object
@@ -62,7 +62,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 
-	// ========== 🔥 状态更新点 #0: 初始化新创建的 Robot ==========
+	// ==========  状态更新点 #0: 初始化新创建的 Robot ==========
 	if robot.Status.Phase == "" {
 		robot.Status.Phase = robotv1alpha1.RobotPhasePending
 		robot.Status.Message = "Waiting for agent to register"
@@ -70,11 +70,11 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			logger.Error(err, "Failed to update Robot status")
 			return ctrl.Result{}, err
 		}
-		logger.Info("🔥 [CONTROLLER] Initialize - Set Phase to Pending", "robotId", robot.Spec.RobotID)
+		logger.Info(" [CONTROLLER] Initialize - Set Phase to Pending", "robotId", robot.Spec.RobotID)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// ========== 🔥 状态更新点 #1: 处理注册/心跳事件（从 annotation 读取） ==========
+	// ==========  状态更新点 #1: 处理注册/心跳事件（从 annotation 读取） ==========
 	// Server 收到 MQTT 消息后会更新 annotation，这里检测并处理
 	if lastHeartbeatAnnotation, exists := robot.Annotations["k8s4r.io/last-heartbeat"]; exists {
 		// 解析 annotation 中的时间
@@ -107,7 +107,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 					return ctrl.Result{}, err
 				}
 
-				logger.Info("🔥 [CONTROLLER] Heartbeat - Updated from annotation",
+				logger.Info(" [CONTROLLER] Heartbeat - Updated from annotation",
 					"robotId", robot.Spec.RobotID,
 					"oldPhase", oldPhase,
 					"newPhase", robot.Status.Phase,
@@ -116,17 +116,17 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 	}
 
-	// ========== 🔥 状态更新点 #2: 检测心跳超时 ==========
+	// ==========  状态更新点 #2: 检测心跳超时 ==========
 	if robot.Status.LastHeartbeatTime != nil {
 		timeSinceLastHeartbeat := time.Since(robot.Status.LastHeartbeatTime.Time)
 
-		logger.V(1).Info("🔍 [CONTROLLER] Checking robot heartbeat",
-			"robotId", robot.Spec.RobotID,
-			"currentPhase", robot.Status.Phase,
-			"lastHeartbeatTime", robot.Status.LastHeartbeatTime.Format(time.RFC3339),
-			"timeSinceHeartbeat", timeSinceLastHeartbeat,
-			"timeout", HeartbeatTimeout,
-			"isOnline", timeSinceLastHeartbeat <= HeartbeatTimeout)
+		// logger.V(1).Info("🔍 [CONTROLLER] Checking robot heartbeat",
+		// 	"robotId", robot.Spec.RobotID,
+		// 	"currentPhase", robot.Status.Phase,
+		// 	"lastHeartbeatTime", robot.Status.LastHeartbeatTime.Format(time.RFC3339),
+		// 	"timeSinceHeartbeat", timeSinceLastHeartbeat,
+		// 	"timeout", HeartbeatTimeout,
+		// 	"isOnline", timeSinceLastHeartbeat <= HeartbeatTimeout)
 
 		// 心跳超时 → Offline
 		if timeSinceLastHeartbeat > HeartbeatTimeout {
@@ -138,7 +138,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 					logger.Error(err, "Failed to update Robot status to Offline")
 					return ctrl.Result{}, err
 				}
-				logger.Info("🔥 [CONTROLLER] Timeout - Set Phase to Offline",
+				logger.Info(" [CONTROLLER] Timeout - Set Phase to Offline",
 					"robotId", robot.Spec.RobotID,
 					"timeSinceHeartbeat", timeSinceLastHeartbeat,
 					"timeout", HeartbeatTimeout)
@@ -187,10 +187,10 @@ func (r *RobotReconciler) periodicHealthCheck(client client.Client) {
 			if robot.Status.LastHeartbeatTime != nil {
 				timeSinceLastHeartbeat := time.Since(robot.Status.LastHeartbeatTime.Time)
 
-				// ========== 🔥 ROBOT 状态更新点 #5: 定期健康检查 - 设置为 Offline ==========
+				// ==========  ROBOT 状态更新点 #5: 定期健康检查 - 设置为 Offline ==========
 				// 📌 心跳超时且状态不是 Offline
 				if timeSinceLastHeartbeat > HeartbeatTimeout && robot.Status.Phase != robotv1alpha1.RobotPhaseOffline {
-					logger.Info("🔥 [ROBOT UPDATE] Periodic Health Check - Detected offline robot",
+					logger.Info(" [ROBOT UPDATE] Periodic Health Check - Detected offline robot",
 						"robot", robot.Name,
 						"timeSinceHeartbeat", timeSinceLastHeartbeat,
 						"currentPhase", robot.Status.Phase)
@@ -201,14 +201,14 @@ func (r *RobotReconciler) periodicHealthCheck(client client.Client) {
 					if err := client.Status().Update(ctx, robot); err != nil {
 						logger.Error(err, "Failed to mark robot as offline", "robot", robot.Name)
 					} else {
-						logger.Info("🔥 [ROBOT UPDATE] Periodic Health Check - Set Phase to Offline", "robot", robot.Name)
+						logger.Info(" [ROBOT UPDATE] Periodic Health Check - Set Phase to Offline", "robot", robot.Name)
 					}
 				}
 
-				// ========== 🔥 ROBOT 状态更新点 #6: 定期健康检查 - 设置为 Online ==========
+				// ==========  ROBOT 状态更新点 #6: 定期健康检查 - 设置为 Online ==========
 				// 📌 心跳正常且状态不是 Online
 				if timeSinceLastHeartbeat <= HeartbeatTimeout && robot.Status.Phase != robotv1alpha1.RobotPhaseOnline {
-					logger.Info("🔥 [ROBOT UPDATE] Periodic Health Check - Detected online robot",
+					logger.Info(" [ROBOT UPDATE] Periodic Health Check - Detected online robot",
 						"robot", robot.Name,
 						"timeSinceHeartbeat", timeSinceLastHeartbeat,
 						"currentPhase", robot.Status.Phase)
@@ -219,7 +219,7 @@ func (r *RobotReconciler) periodicHealthCheck(client client.Client) {
 					if err := client.Status().Update(ctx, robot); err != nil {
 						logger.Error(err, "Failed to mark robot as online", "robot", robot.Name)
 					} else {
-						logger.Info("🔥 [ROBOT UPDATE] Periodic Health Check - Set Phase to Online", "robot", robot.Name)
+						logger.Info(" [ROBOT UPDATE] Periodic Health Check - Set Phase to Online", "robot", robot.Name)
 					}
 				}
 			}

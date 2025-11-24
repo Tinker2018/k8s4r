@@ -17,7 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/hxndg/k8s4r/pkg/server"
+	"github.com/hxndghxndg/k8s4r/pkg/server"
 )
 
 var (
@@ -42,7 +42,7 @@ func main() {
 	// 创建 gRPC Stream Server（不依赖 K8s）
 	srv := server.NewGRPCStreamServer(brokerURL, grpcAddr)
 
-	setupLog.Info("🚀 Starting Server (gRPC + MQTT, NO Kubernetes dependency)",
+	setupLog.Info(" Starting Server (gRPC + MQTT, NO Kubernetes dependency)",
 		"mqttBroker", brokerURL,
 		"grpcManager", grpcAddr)
 
@@ -54,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("✅ Server started successfully - Ready to relay MQTT ↔ gRPC")
+	setupLog.Info(" Server started successfully - Ready to relay MQTT ↔ gRPC")
 
 	// 保持程序运行直到收到信号
 	<-ctx.Done()

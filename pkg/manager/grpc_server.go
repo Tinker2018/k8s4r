@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	pb "github.com/hxndg/k8s4r/api/grpc"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	pb "github.com/hxndghxndg/k8s4r/api/grpc"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 // GRPCServer 实现 RobotManager gRPC 服务
@@ -54,7 +54,7 @@ type CompositeGRPCService struct {
 // 负责创建 Robot、更新心跳时间、设置 Phase
 func (s *GRPCServer) ReportRobotRegistration(ctx context.Context, req *pb.RegistrationRequest) (*pb.RegistrationResponse, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("📥 [GRPC] Received registration request", "robotId", req.RobotId)
+	logger.Info(" [GRPC] Received registration request", "robotId", req.RobotId)
 
 	// 查找或创建 Robot 资源
 	robot := &robotv1alpha1.Robot{}
@@ -81,13 +81,13 @@ func (s *GRPCServer) ReportRobotRegistration(ctx context.Context, req *pb.Regist
 		}
 
 		if err := s.Client.Create(ctx, robot); err != nil {
-			logger.Error(err, "❌ [GRPC] Failed to create Robot", "robotId", req.RobotId)
+			logger.Error(err, " [GRPC] Failed to create Robot", "robotId", req.RobotId)
 			return &pb.RegistrationResponse{
 				Success: false,
 				Message: "Failed to create robot: " + err.Error(),
 			}, nil
 		}
-		logger.Info("✅ [GRPC] Created Robot resource", "robotId", req.RobotId)
+		logger.Info(" [GRPC] Created Robot resource", "robotId", req.RobotId)
 
 		// 重新获取创建后的 Robot（获取 UID 等字段）
 		if err := s.Client.Get(ctx, types.NamespacedName{
@@ -114,7 +114,7 @@ func (s *GRPCServer) ReportRobotRegistration(ctx context.Context, req *pb.Regist
 			robot.Status.DeviceInfo = convertDeviceInfo(req.DeviceInfo)
 		} else {
 			robot.Status.DeviceInfo = &fullDeviceInfo
-			logger.Info("📊 [DEVICE] Received full device info",
+			logger.Info(" [DEVICE] Received full device info",
 				"robotId", req.RobotId,
 				"hostname", fullDeviceInfo.Hostname,
 				"cpus", fullDeviceInfo.CPU.LogicalCores,
@@ -129,14 +129,14 @@ func (s *GRPCServer) ReportRobotRegistration(ctx context.Context, req *pb.Regist
 	robot.Status.Message = "Robot registered and online"
 
 	if err := s.Client.Status().Update(ctx, robot); err != nil {
-		logger.Error(err, "❌ [GRPC] Failed to update Robot status", "robotId", req.RobotId)
+		logger.Error(err, " [GRPC] Failed to update Robot status", "robotId", req.RobotId)
 		return &pb.RegistrationResponse{
 			Success: false,
 			Message: "Failed to update robot status: " + err.Error(),
 		}, nil
 	}
 
-	logger.Info("🔥 [GRPC] Robot registration processed",
+	logger.Info(" [GRPC] Robot registration processed",
 		"robotId", req.RobotId,
 		"phase", robot.Status.Phase,
 		"heartbeat", now.Format(time.RFC3339))
@@ -150,7 +150,7 @@ func (s *GRPCServer) ReportRobotRegistration(ctx context.Context, req *pb.Regist
 // ReportRobotHeartbeat 处理 Robot 心跳
 func (s *GRPCServer) ReportRobotHeartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("📥 [GRPC] Received heartbeat", "robotId", req.RobotId)
+	logger.V(1).Info(" [GRPC] Received heartbeat", "robotId", req.RobotId)
 
 	// 获取 Robot 资源
 	robot := &robotv1alpha1.Robot{}
@@ -160,7 +160,7 @@ func (s *GRPCServer) ReportRobotHeartbeat(ctx context.Context, req *pb.Heartbeat
 	}, robot)
 
 	if err != nil {
-		logger.Error(err, "❌ [GRPC] Robot not found", "robotId", req.RobotId)
+		logger.Error(err, " [GRPC] Robot not found", "robotId", req.RobotId)
 		return &pb.HeartbeatResponse{
 			Success: false,
 			Message: "Robot not found: " + err.Error(),
@@ -192,7 +192,7 @@ func (s *GRPCServer) ReportRobotHeartbeat(ctx context.Context, req *pb.Heartbeat
 	robot.Status.Message = "Robot is online"
 
 	if err := s.Client.Status().Update(ctx, robot); err != nil {
-		logger.Error(err, "❌ [GRPC] Failed to update heartbeat", "robotId", req.RobotId)
+		logger.Error(err, " [GRPC] Failed to update heartbeat", "robotId", req.RobotId)
 		return &pb.HeartbeatResponse{
 			Success: false,
 			Message: "Failed to update heartbeat: " + err.Error(),
@@ -200,7 +200,7 @@ func (s *GRPCServer) ReportRobotHeartbeat(ctx context.Context, req *pb.Heartbeat
 	}
 
 	if oldPhase != robot.Status.Phase {
-		logger.Info("🔥 [GRPC] Robot phase changed",
+		logger.Info(" [GRPC] Robot phase changed",
 			"robotId", req.RobotId,
 			"oldPhase", oldPhase,
 			"newPhase", robot.Status.Phase,
@@ -216,7 +216,7 @@ func (s *GRPCServer) ReportRobotHeartbeat(ctx context.Context, req *pb.Heartbeat
 // ReportTaskStatus 处理任务状态上报
 func (s *GRPCServer) ReportTaskStatus(ctx context.Context, req *pb.TaskStatusRequest) (*pb.TaskStatusResponse, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("📥 [GRPC] Received task status",
+	logger.Info(" [GRPC] Received task status",
 		"taskUid", req.TaskUid,
 		"state", req.State,
 		"event", req.Event)
@@ -241,7 +241,7 @@ func (s *GRPCServer) ReportTaskStatus(ctx context.Context, req *pb.TaskStatusReq
 	}
 
 	if task == nil {
-		logger.Error(nil, "❌ [GRPC] Task not found", "taskUid", req.TaskUid)
+		logger.Error(nil, " [GRPC] Task not found", "taskUid", req.TaskUid)
 		return &pb.TaskStatusResponse{
 			Success: false,
 			Message: "Task not found",
@@ -252,10 +252,10 @@ func (s *GRPCServer) ReportTaskStatus(ctx context.Context, req *pb.TaskStatusReq
 	oldState := task.Status.State
 	newState := robotv1alpha1.TaskState(req.State)
 
-	// 特殊处理：如果是 pending 状态上报，且当前是 dispatching，转为 running
-	if newState == "pending" && task.Status.State == robotv1alpha1.TaskStateDispatching {
+	// 特殊处理：如果是 pending 状态上报，且当前是 scheduled，转为 running
+	if newState == "pending" && task.Status.State == robotv1alpha1.TaskStateScheduled {
 		newState = robotv1alpha1.TaskStateRunning
-		logger.Info("Task state transition: dispatching -> running (agent acknowledged)")
+		logger.Info("Task state transition: scheduled -> running (agent acknowledged)")
 	}
 
 	task.Status.State = newState
@@ -264,14 +264,14 @@ func (s *GRPCServer) ReportTaskStatus(ctx context.Context, req *pb.TaskStatusReq
 	task.Status.ExitCode = &exitCode
 
 	if err := s.Client.Status().Update(ctx, task); err != nil {
-		logger.Error(err, "❌ [GRPC] Failed to update task status", "task", task.Name)
+		logger.Error(err, " [GRPC] Failed to update task status", "task", task.Name)
 		return &pb.TaskStatusResponse{
 			Success: false,
 			Message: "Failed to update task status: " + err.Error(),
 		}, nil
 	}
 
-	logger.Info("🔥 [GRPC] Task status updated",
+	logger.Info(" [GRPC] Task status updated",
 		"task", task.Name,
 		"oldState", oldState,
 		"newState", newState,

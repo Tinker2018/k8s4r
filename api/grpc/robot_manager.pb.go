@@ -943,7 +943,7 @@ const file_api_grpc_robot_manager_proto_rawDesc = "" +
 	"\x17ReportRobotRegistration\x12\x19.grpc.RegistrationRequest\x1a\x1a.grpc.RegistrationResponse\x12G\n" +
 	"\x14ReportRobotHeartbeat\x12\x16.grpc.HeartbeatRequest\x1a\x17.grpc.HeartbeatResponse\x12E\n" +
 	"\x10ReportTaskStatus\x12\x17.grpc.TaskStatusRequest\x1a\x18.grpc.TaskStatusResponse\x125\n" +
-	"\vStreamTasks\x12\x0f.grpc.TaskEvent\x1a\x11.grpc.TaskCommand(\x010\x01B!Z\x1fgithub.com/hxndg/k8s4r/api/grpcb\x06proto3"
+	"\vStreamTasks\x12\x0f.grpc.TaskEvent\x1a\x11.grpc.TaskCommand(\x010\x01B&Z$github.com/hxndghxndg/k8s4r/api/grpcb\x06proto3"
 
 var (
 	file_api_grpc_robot_manager_proto_rawDescOnce sync.Once

@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 const (
@@ -117,7 +117,7 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	logger.Info("📥 [SERVER] Received register request from MQTT", "robotId", req.RobotID)
+	logger.Info(" [SERVER] Received register request from MQTT", "robotId", req.RobotID)
 
 	// 查找或创建 Robot 资源
 	robot := &robotv1alpha1.Robot{}
@@ -143,16 +143,16 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 		}
 
 		if err := s.Client.Create(s.ctx, robot); err != nil {
-			logger.Error(err, "❌ [SERVER] Failed to create Robot resource", "robotId", req.RobotID)
+			logger.Error(err, " [SERVER] Failed to create Robot resource", "robotId", req.RobotID)
 			s.sendResponse(req.RobotID, false, "Failed to register robot")
 			return
 		}
 
-		logger.Info("✅ [SERVER] Created Robot resource, waiting for RobotController to initialize",
+		logger.Info(" [SERVER] Created Robot resource, waiting for RobotController to initialize",
 			"robotId", req.RobotID)
 	}
 
-	// ========== 🔥 关键改动：Server 只更新 annotation，不修改 status ==========
+	// ==========  关键改动：Server 只更新 annotation，不修改 status ==========
 	// 通过更新 annotation 通知 RobotController 处理注册事件
 	// RobotController 会：1. 更新 LastHeartbeatTime  2. 更新 DeviceInfo  3. 设置 Phase = Online
 	if robot.Annotations == nil {
@@ -167,7 +167,7 @@ func (s *Server) RegisterHandler(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	if err := s.Client.Update(s.ctx, robot); err != nil {
-		logger.Error(err, "❌ [SERVER] Failed to update Robot annotations", "robotId", req.RobotID)
+		logger.Error(err, " [SERVER] Failed to update Robot annotations", "robotId", req.RobotID)
 		s.sendResponse(req.RobotID, false, "Failed to update registration")
 		return
 	}
@@ -204,7 +204,7 @@ func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// ========== 🔥 关键改动：Server 只更新 annotation，不修改 status ==========
+	// ==========  关键改动：Server 只更新 annotation，不修改 status ==========
 	// 通过更新 annotation 通知 RobotController 处理心跳事件
 	// RobotController 会：1. 更新 LastHeartbeatTime  2. 更新 DeviceInfo  3. 检查并设置 Phase
 	if robot.Annotations == nil {
@@ -219,7 +219,7 @@ func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	if err := s.Client.Update(s.ctx, robot); err != nil {
-		logger.Error(err, "❌ [SERVER] Failed to update robot annotations", "robotId", req.RobotID)
+		logger.Error(err, " [SERVER] Failed to update robot annotations", "robotId", req.RobotID)
 		return
 	}
 
@@ -275,7 +275,7 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 	newState := robotv1alpha1.TaskState(statusMsg.State)
 
 	// 特殊处理：如果是 pending 状态上报，且当前是 dispatching，转为 running
-	if newState == "pending" && task.Status.State == robotv1alpha1.TaskStateDispatching {
+	if newState == "pending" && task.Status.State == robotv1alpha1.TaskStateScheduled {
 		newState = robotv1alpha1.TaskStateRunning
 		logger.Info("Task state transition: dispatching -> running (agent acknowledged)")
 	}
@@ -425,7 +425,7 @@ func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Tas
 		"topic", topic)
 
 	// 更新 Task 状态为 dispatching（表示已通过 MQTT 发送）
-	task.Status.State = robotv1alpha1.TaskStateDispatching
+	task.Status.State = robotv1alpha1.TaskStateScheduled
 	task.Status.Message = fmt.Sprintf("Dispatched to robot %s via MQTT", task.Spec.TargetRobot)
 	if err := s.Client.Status().Update(ctx, task); err != nil {
 		logger.Error(err, "Failed to update task status to dispatching", "task", task.Name)
@@ -598,7 +598,7 @@ func (s *Server) addTaskToRobotState(ctx context.Context, task *robotv1alpha1.Ta
 
 		// 只保存 pending, dispatching, running 状态的任务
 		if t.Status.State == robotv1alpha1.TaskStatePending ||
-			t.Status.State == robotv1alpha1.TaskStateDispatching ||
+			t.Status.State == robotv1alpha1.TaskStateScheduled ||
 			t.Status.State == robotv1alpha1.TaskStateRunning ||
 			t.Status.State == "" {
 			pendingTasks = append(pendingTasks, t)

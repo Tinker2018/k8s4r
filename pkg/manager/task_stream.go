@@ -19,8 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	pb "github.com/hxndg/k8s4r/api/grpc"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	pb "github.com/hxndghxndg/k8s4r/api/grpc"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 // TaskStreamManager 管理与 Server 的 Task 流连接
@@ -56,7 +56,7 @@ func (m *TaskStreamManager) StreamTasks(stream pb.RobotManager_StreamTasksServer
 	logger := log.Log.WithName("task-stream")
 	streamID := generateStreamID()
 
-	logger.Info("📡 [STREAM] New stream connection established", "streamID", streamID)
+	logger.Info(" [STREAM] New stream connection established", "streamID", streamID)
 
 	// 注册 stream
 	m.streamsMu.Lock()
@@ -68,7 +68,7 @@ func (m *TaskStreamManager) StreamTasks(stream pb.RobotManager_StreamTasksServer
 		m.streamsMu.Lock()
 		delete(m.streams, streamID)
 		m.streamsMu.Unlock()
-		logger.Info("📡 [STREAM] Stream connection closed", "streamID", streamID)
+		logger.Info(" [STREAM] Stream connection closed", "streamID", streamID)
 	}()
 
 	// 发送 keepalive（验证连接）
@@ -87,7 +87,7 @@ func (m *TaskStreamManager) StreamTasks(stream pb.RobotManager_StreamTasksServer
 			return err
 		}
 
-		logger.Info("📥 [STREAM] Received event from Server",
+		logger.Info(" [STREAM] Received event from Server",
 			"type", event.Type,
 			"taskUid", event.TaskUid,
 			"message", event.Message)
@@ -127,14 +127,14 @@ func (m *TaskStreamManager) updateTaskStateToDispatching(ctx context.Context, ta
 		task := &taskList.Items[i]
 		if string(task.UID) == taskUID {
 			// 更新状态
-			task.Status.State = robotv1alpha1.TaskStateDispatching
+			task.Status.State = robotv1alpha1.TaskStateScheduled
 			task.Status.Message = "Task published to MQTT"
 
 			if err := m.client.Status().Update(ctx, task); err != nil {
 				return err
 			}
 
-			logger.Info("🔥 [STREAM] Task state updated to dispatching",
+			logger.Info(" [STREAM] Task state updated to scheduled",
 				"task", task.Name,
 				"taskUid", taskUID)
 			return nil
@@ -190,7 +190,7 @@ func (m *TaskStreamManager) PushTaskToStream(ctx context.Context, task *robotv1a
 			logger.Error(err, "Failed to send task to stream", "streamID", streamID, "task", task.Name)
 		} else {
 			successCount++
-			logger.Info("📤 [STREAM] Task pushed to Server",
+			logger.Info(" [STREAM] Task pushed to Server",
 				"streamID", streamID,
 				"task", task.Name,
 				"targetRobot", task.Spec.TargetRobot)
@@ -203,7 +203,7 @@ func (m *TaskStreamManager) PushTaskToStream(ctx context.Context, task *robotv1a
 		m.dispatchedTasks[taskUID] = true
 		m.dispatchedMu.Unlock()
 
-		logger.Info("✅ [STREAM] Task dispatched successfully",
+		logger.Info(" [STREAM] Task dispatched successfully",
 			"task", task.Name,
 			"streamCount", successCount)
 	}
@@ -227,7 +227,7 @@ func (m *TaskStreamManager) PushDeleteTaskToStream(ctx context.Context, taskUID 
 		if err := stream.Send(command); err != nil {
 			logger.Error(err, "Failed to send delete command", "streamID", streamID, "taskUid", taskUID)
 		} else {
-			logger.Info("📤 [STREAM] Delete command sent", "streamID", streamID, "taskUid", taskUID)
+			logger.Info(" [STREAM] Delete command sent", "streamID", streamID, "taskUid", taskUID)
 		}
 	}
 

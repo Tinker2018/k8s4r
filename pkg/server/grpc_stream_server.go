@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/hxndg/k8s4r/api/grpc"
+	pb "github.com/hxndghxndg/k8s4r/api/grpc"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -63,7 +63,7 @@ func NewGRPCStreamServer(mqttBroker, grpcAddr string) *GRPCStreamServer {
 // Start 启动 Server
 func (s *GRPCStreamServer) Start() error {
 	logger := log.FromContext(s.ctx)
-	logger.Info("🚀 Starting GRPCStreamServer (gRPC + MQTT, NO K8s)")
+	logger.Info(" Starting GRPCStreamServer (gRPC + MQTT, NO K8s)")
 
 	// 1. 连接 gRPC Manager
 	if err := s.connectGRPC(); err != nil {
@@ -83,7 +83,7 @@ func (s *GRPCStreamServer) Start() error {
 	// 4. 启动 Stream 接收循环（接收 Manager 推送的任务）
 	go s.receiveTasksFromStream()
 
-	logger.Info("✅ GRPCStreamServer started successfully")
+	logger.Info(" GRPCStreamServer started successfully")
 	return nil
 }
 
@@ -119,7 +119,7 @@ func (s *GRPCStreamServer) connectGRPC() error {
 	s.grpcConn = conn
 	s.grpcClient = pb.NewRobotManagerClient(conn)
 
-	logger.Info("✅ Connected to Manager gRPC server")
+	logger.Info(" Connected to Manager gRPC server")
 	return nil
 }
 
@@ -134,7 +134,7 @@ func (s *GRPCStreamServer) initTaskStream() error {
 	}
 
 	s.taskStream = stream
-	logger.Info("✅ StreamTasks initialized")
+	logger.Info(" StreamTasks initialized")
 	return nil
 }
 
@@ -144,7 +144,7 @@ func (s *GRPCStreamServer) initTaskStream() error {
 // Server 通过 stream.Recv() 接收任务
 func (s *GRPCStreamServer) receiveTasksFromStream() {
 	logger := log.FromContext(s.ctx)
-	logger.Info("📡 Started receiving tasks from Manager stream")
+	logger.Info(" Started receiving tasks from Manager stream")
 
 	const (
 		topicRegister                = "k8s4r/register"
@@ -174,7 +174,7 @@ func (s *GRPCStreamServer) receiveTasksFromStream() {
 		switch taskCmd.Type {
 		case pb.TaskCommand_CREATE_TASK:
 			if taskCmd.Task != nil {
-				logger.Info("📥 [GRPC STREAM] Received CREATE_TASK from Manager",
+				logger.Info(" [GRPC STREAM] Received CREATE_TASK from Manager",
 					"taskUID", taskCmd.Task.Uid,
 					"taskName", taskCmd.Task.Name)
 				s.handleCreateTask(taskCmd.Task, topicRobotTaskDispatch)
@@ -183,7 +183,7 @@ func (s *GRPCStreamServer) receiveTasksFromStream() {
 			}
 		case pb.TaskCommand_DELETE_TASK:
 			if taskCmd.Task != nil {
-				logger.Info("📥 [GRPC STREAM] Received DELETE_TASK from Manager",
+				logger.Info(" [GRPC STREAM] Received DELETE_TASK from Manager",
 					"taskUID", taskCmd.Task.Uid)
 				s.handleDeleteTask(taskCmd.Task)
 			} else {
@@ -260,7 +260,7 @@ func (s *GRPCStreamServer) handleCreateTask(task *pb.Task, topicTemplate string)
 		return
 	}
 
-	logger.Info("✅ [MQTT] Task dispatched successfully",
+	logger.Info(" [MQTT] Task dispatched successfully",
 		"taskUID", task.Uid,
 		"robot", task.TargetRobot,
 		"topic", topic)
@@ -298,7 +298,7 @@ func (s *GRPCStreamServer) sendTaskEvent(event *pb.TaskEvent) {
 		return
 	}
 
-	logger.V(1).Info("📤 [GRPC STREAM] Sent TaskEvent to Manager",
+	logger.V(1).Info(" [GRPC STREAM] Sent TaskEvent to Manager",
 		"type", event.Type,
 		"taskUID", event.TaskUid)
 }
@@ -316,12 +316,12 @@ func (s *GRPCStreamServer) connectMQTT() error {
 	opts.SetPingTimeout(10 * time.Second)
 
 	opts.OnConnect = func(c mqtt.Client) {
-		logger.Info("✅ Connected to MQTT broker")
+		logger.Info(" Connected to MQTT broker")
 		s.subscribeTopics()
 	}
 
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
-		logger.Error(err, "❌ Lost connection to MQTT broker")
+		logger.Error(err, " Lost connection to MQTT broker")
 	}
 
 	s.mqttClient = mqtt.NewClient(opts)
@@ -358,7 +358,7 @@ func (s *GRPCStreamServer) subscribeTopics() {
 		logger.Error(token.Error(), "Failed to subscribe to task status topic")
 	}
 
-	logger.Info("✅ Subscribed to MQTT topics")
+	logger.Info(" Subscribed to MQTT topics")
 }
 
 // handleRegister 处理 Agent 注册消息
@@ -367,7 +367,7 @@ func (s *GRPCStreamServer) handleRegister(client mqtt.Client, msg mqtt.Message) 
 	logger := log.FromContext(s.ctx)
 
 	// 打印完整的 MQTT 消息
-	logger.Info("📥 [MQTT] Received registration message",
+	logger.Info(" [MQTT] Received registration message",
 		"topic", msg.Topic(),
 		"payload", string(msg.Payload()))
 
@@ -382,7 +382,7 @@ func (s *GRPCStreamServer) handleRegister(client mqtt.Client, msg mqtt.Message) 
 		return
 	}
 
-	logger.Info("📥 [MQTT] Parsed registration", "robotId", req.RobotID)
+	logger.Info(" [MQTT] Parsed registration", "robotId", req.RobotID)
 
 	// 转换 DeviceInfo（简化版本）
 	pbDeviceInfo, err := convertDeviceInfoFromJSON(req.DeviceInfo)
@@ -391,7 +391,7 @@ func (s *GRPCStreamServer) handleRegister(client mqtt.Client, msg mqtt.Message) 
 		// 即使 DeviceInfo 转换失败，也继续注册（使用 nil）
 		pbDeviceInfo = nil
 	} else if pbDeviceInfo != nil {
-		logger.Info("📊 [DEVICE] Converted device info",
+		logger.Info(" [DEVICE] Converted device info",
 			"robotId", req.RobotID,
 			"hostname", pbDeviceInfo.Hostname,
 			"os", pbDeviceInfo.Os,
@@ -418,7 +418,7 @@ func (s *GRPCStreamServer) handleRegister(client mqtt.Client, msg mqtt.Message) 
 		return
 	}
 
-	logger.Info("✅ [GRPC] Registration reported to Manager", "success", resp.Success)
+	logger.Info(" [GRPC] Registration reported to Manager", "success", resp.Success)
 
 	// 发送成功响应给 Agent
 	s.publishResponse(req.RobotID, resp.Success, resp.Message)
@@ -430,9 +430,9 @@ func (s *GRPCStreamServer) handleHeartbeat(client mqtt.Client, msg mqtt.Message)
 	logger := log.FromContext(s.ctx)
 
 	// 打印完整的 MQTT 消息
-	logger.V(1).Info("💓 [MQTT] Received heartbeat message",
-		"topic", msg.Topic(),
-		"payload", string(msg.Payload()))
+	// logger.V(1).Info("💓 [MQTT] Received heartbeat message",
+	// 	"topic", msg.Topic(),
+	// 	"payload", string(msg.Payload()))
 
 	var req struct {
 		RobotID    string          `json:"robotId"`
@@ -471,7 +471,7 @@ func (s *GRPCStreamServer) handleHeartbeat(client mqtt.Client, msg mqtt.Message)
 		return
 	}
 
-	logger.V(1).Info("✅ [GRPC] Heartbeat reported to Manager", "success", resp.Success)
+	logger.V(1).Info(" [GRPC] Heartbeat reported to Manager", "success", resp.Success)
 }
 
 // handleTaskStatus 处理 Agent 任务状态上报
@@ -480,7 +480,7 @@ func (s *GRPCStreamServer) handleTaskStatus(client mqtt.Client, msg mqtt.Message
 	logger := log.FromContext(s.ctx)
 
 	// 打印完整的 MQTT 消息
-	logger.Info("📥 [MQTT] Received task status message",
+	logger.Info(" [MQTT] Received task status message",
 		"topic", msg.Topic(),
 		"payload", string(msg.Payload()))
 
@@ -498,7 +498,7 @@ func (s *GRPCStreamServer) handleTaskStatus(client mqtt.Client, msg mqtt.Message
 		return
 	}
 
-	logger.Info("📥 [MQTT] Parsed task status",
+	logger.Info(" [MQTT] Parsed task status",
 		"taskUID", status.TaskUID,
 		"state", status.State,
 		"event", status.Event)
@@ -521,7 +521,7 @@ func (s *GRPCStreamServer) handleTaskStatus(client mqtt.Client, msg mqtt.Message
 		return
 	}
 
-	logger.Info("✅ [GRPC] Task status reported to Manager", "success", resp.Success)
+	logger.Info(" [GRPC] Task status reported to Manager", "success", resp.Success)
 }
 
 // publishResponse 发送响应消息到 Agent
@@ -548,7 +548,7 @@ func (s *GRPCStreamServer) publishResponse(robotID string, success bool, message
 		return
 	}
 
-	logger.V(1).Info("📤 [MQTT] Published response to Agent",
+	logger.V(1).Info(" [MQTT] Published response to Agent",
 		"robotId", robotID,
 		"topic", topic,
 		"success", success)

@@ -21,7 +21,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )

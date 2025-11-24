@@ -22,9 +22,9 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndg/k8s4r/pkg/agent"
-	"github.com/hxndg/k8s4r/pkg/collector"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndghxndg/k8s4r/pkg/agent"
+	"github.com/hxndghxndg/k8s4r/pkg/collector"
 )
 
 // RegisterRequest 是注册请求的结构
@@ -186,7 +186,7 @@ func (a *Agent) setupMQTT() error {
 // handleResponse 处理服务器响应
 func (a *Agent) handleResponse(client mqtt.Client, msg mqtt.Message) {
 	// 打印完整的 MQTT 消息
-	log.Printf("📥 [MQTT] Received response message - topic: %s, payload: %s",
+	log.Printf(" [MQTT] Received response message - topic: %s, payload: %s",
 		msg.Topic(), string(msg.Payload()))
 
 	var response Response
@@ -195,7 +195,7 @@ func (a *Agent) handleResponse(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	log.Printf("📥 [MQTT] Parsed response: success=%v, message=%s", response.Success, response.Message)
+	log.Printf(" [MQTT] Parsed response: success=%v, message=%s", response.Success, response.Message)
 
 	// 将响应发送到通道
 	select {

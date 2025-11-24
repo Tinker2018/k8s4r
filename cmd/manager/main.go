@@ -24,10 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	pb "github.com/hxndg/k8s4r/api/grpc"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndg/k8s4r/pkg/controller"
-	"github.com/hxndg/k8s4r/pkg/manager"
+	pb "github.com/hxndghxndg/k8s4r/api/grpc"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndghxndg/k8s4r/pkg/controller"
+	"github.com/hxndghxndg/k8s4r/pkg/manager"
 )
 
 var (

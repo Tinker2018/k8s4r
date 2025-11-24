@@ -10,8 +10,9 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/hashicorp/go-hclog"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndg/k8s4r/pkg/driver"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndghxndg/k8s4r/pkg/driver"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TaskExecutor 负责在 Agent 端执行任务
@@ -221,28 +222,54 @@ func (te *TaskExecutor) handleStateRecovery(ctx context.Context, msg mqtt.Messag
 // handleTaskMessage 处理接收到的任务消息
 func (te *TaskExecutor) handleTaskMessage(ctx context.Context, msg mqtt.Message) {
 	// 打印完整的 MQTT 消息
-	te.logger.Info("📥 [MQTT] Received task dispatch message",
+	te.logger.Info(" [MQTT] Received task dispatch message",
 		"topic", msg.Topic(),
 		"payload", string(msg.Payload()))
 
-	var taskMsg TaskMessage
-	if err := json.Unmarshal(msg.Payload(), &taskMsg); err != nil {
+	// 解析简化的任务消息（从 Server 发送）
+	var simplifiedMsg struct {
+		TaskUID     string            `json:"taskUid"`
+		TaskName    string            `json:"taskName"`
+		Driver      string            `json:"driver"`
+		Config      string            `json:"config"`
+		Timeout     int32             `json:"timeout"`
+		KillTimeout int32             `json:"killTimeout"`
+		Env         map[string]string `json:"env"`
+	}
+
+	if err := json.Unmarshal(msg.Payload(), &simplifiedMsg); err != nil {
 		te.logger.Error("failed to unmarshal task message", "error", err)
 		return
 	}
 
-	te.logger.Info("📥 [MQTT] Parsed task message",
-		"action", taskMsg.Action,
-		"taskUID", string(taskMsg.Task.UID))
+	te.logger.Info(" [MQTT] Parsed task message",
+		"taskUID", simplifiedMsg.TaskUID,
+		"taskName", simplifiedMsg.TaskName,
+		"driver", simplifiedMsg.Driver)
 
-	switch taskMsg.Action {
-	case "create":
-		te.createTask(ctx, taskMsg.Task)
-	case "delete":
-		te.deleteTask(ctx, taskMsg.Task)
-	default:
-		te.logger.Error("unknown task action", "action", taskMsg.Action)
+	// 解析 Config JSON 字符串
+	var config robotv1alpha1.TaskDriverConfig
+	if simplifiedMsg.Config != "" {
+		if err := json.Unmarshal([]byte(simplifiedMsg.Config), &config); err != nil {
+			te.logger.Error("failed to unmarshal config", "error", err, "config", simplifiedMsg.Config)
+			return
+		}
 	}
+
+	// 构造 Task 对象
+	task := &robotv1alpha1.Task{
+		Spec: robotv1alpha1.TaskSpec{
+			Name:   simplifiedMsg.TaskName,
+			Driver: robotv1alpha1.TaskDriverType(simplifiedMsg.Driver),
+			Config: config,
+			Env:    simplifiedMsg.Env,
+		},
+	}
+	task.UID = types.UID(simplifiedMsg.TaskUID)
+	task.Name = simplifiedMsg.TaskName
+
+	// 创建任务
+	te.createTask(ctx, task)
 }
 
 // createTask 创建并启动任务

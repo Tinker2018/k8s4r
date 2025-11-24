@@ -23,7 +23,7 @@ import (
 	netutil "github.com/shirou/gopsutil/v3/net"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 // CollectDeviceInfo 采集完整的设备信息（类似 psutil）

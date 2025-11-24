@@ -92,16 +92,33 @@ type TaskGroupStatus struct {
 	// CompletedAt 完成时间
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// AssignedRobots 调度决策：每个副本分配到的Robot
+	// Index 对应副本索引，RobotName 对应分配的Robot名称
+	// +optional
+	AssignedRobots []RobotAssignment `json:"assignedRobots,omitempty"`
+}
+
+// RobotAssignment 定义副本到Robot的分配关系
+type RobotAssignment struct {
+	// ReplicaIndex 副本索引（0-based）
+	ReplicaIndex int32 `json:"replicaIndex"`
+
+	// RobotName 分配的Robot名称
+	RobotName string `json:"robotName"`
 }
 
 // TaskGroupState 定义 TaskGroup 的状态
 type TaskGroupState string
 
 const (
-	// TaskGroupStatePending TaskGroup 等待中
+	// TaskGroupStatePending TaskGroup 等待调度
 	TaskGroupStatePending TaskGroupState = "pending"
 
-	// TaskGroupStateRunning TaskGroup 运行中
+	// TaskGroupStateScheduled TaskGroup 已完成调度（AssignedRobots已设置）
+	TaskGroupStateScheduled TaskGroupState = "scheduled"
+
+	// TaskGroupStateRunning TaskGroup 运行中（至少有一个Task已Scheduled）
 	TaskGroupStateRunning TaskGroupState = "running"
 
 	// TaskGroupStateCompleted TaskGroup 已完成

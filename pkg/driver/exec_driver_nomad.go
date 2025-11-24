@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 
 	// Nomad 的核心包
 	getter "github.com/hashicorp/go-getter"
@@ -97,7 +97,12 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 	defer d.mu.Unlock()
 
 	taskID := string(task.UID)
-	d.logger.Info("starting task with Nomad executor", "taskID", taskID, "name", task.Name)
+	taskGroupName := task.Spec.TaskGroupName
+
+	d.logger.Info("starting task with Nomad executor",
+		"taskID", taskID,
+		"name", task.Name,
+		"taskGroup", taskGroupName)
 
 	// 检查任务是否已存在
 	if _, exists := d.tasks[taskID]; exists {
@@ -111,21 +116,38 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 
 	cfg := task.Spec.Config.ExecConfig
 
-	// 创建任务目录结构
-	taskDir := filepath.Join(d.baseDir, taskID)
-	logDir := filepath.Join(taskDir, "logs")
-	artifactsDir := filepath.Join(taskDir, "artifacts")
+	// 创建 TaskGroup 级别的目录结构（同一 TaskGroup 的所有 Task 共享）
+	taskGroupDir := filepath.Join(d.baseDir, taskGroupName)
+	sharedDir := filepath.Join(taskGroupDir, "shared") // 共享目录
+	artifactsDir := filepath.Join(sharedDir, "local")  // artifacts 下载到 shared/local
 
-	// 确保目录存在
-	for _, dir := range []string{d.baseDir, taskDir, logDir, artifactsDir} {
+	// 创建 Task 级别的工作目录
+	taskDir := filepath.Join(taskGroupDir, taskID)
+	logDir := filepath.Join(taskDir, "logs")
+	localDir := filepath.Join(taskDir, "local") // Task 的 local 目录（softlink 到 ../shared/local）
+
+	// 确保 TaskGroup 共享目录和 artifacts 目录存在
+	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create artifacts dir %s: %w", artifactsDir, err)
+	}
+
+	// 确保 Task 目录存在
+	for _, dir := range []string{taskDir, logDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create dir %s: %w", dir, err)
 		}
 	}
 
+	// 创建 softlink: taskDir/local -> ../shared/local
+	// 这样同一 TaskGroup 的所有 Task 都能通过 local/ 访问共享的 artifacts
+	relSharedLocal := filepath.Join("..", "shared", "local")
+	if err := os.Symlink(relSharedLocal, localDir); err != nil && !os.IsExist(err) {
+		return nil, fmt.Errorf("failed to create symlink %s -> %s: %w", localDir, relSharedLocal, err)
+	}
+
 	// 下载 artifacts（使用 go-getter，HTTP 客户端已配置超时）
 	if len(task.Spec.Artifacts) > 0 {
-		d.logger.Info("downloading artifacts", "count", len(task.Spec.Artifacts))
+		d.logger.Info("downloading artifacts", "count", len(task.Spec.Artifacts), "destination", artifactsDir)
 		d.emitEvent(taskID, "Downloading", fmt.Sprintf("Downloading %d artifacts", len(task.Spec.Artifacts)))
 
 		// 直接调用下载方法（超时在 HTTP 客户端中配置）

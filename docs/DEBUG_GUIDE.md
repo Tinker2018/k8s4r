@@ -62,7 +62,7 @@ mosquitto_sub --help
 推荐按照以下顺序启动各组件：
 
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 1. 安装所有 CRD (Robot, Job, TaskGroup, Task)
 kubectl apply -f config/crd/
@@ -106,7 +106,7 @@ kubectl get tasks
 ### 步骤 1: 安装 CRD
 
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 安装所有 CRD (Robot, Job, Task)
 kubectl apply -f config/crd/
@@ -125,7 +125,7 @@ kubectl get crd | grep robot
 
 ```bash
 # Terminal 1
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 使用简化模式启动 MQTT Broker
 ./config/mosquitto/start-mosquitto.sh simple
@@ -162,7 +162,7 @@ mosquitto_pub -h localhost -p 1883 -t "test" -m "hello"
 
 ```bash
 # Terminal 2
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 直接运行（无需编译）
 go run cmd/manager/main.go
@@ -183,7 +183,7 @@ INFO    Starting JobReconciler
 
 ```bash
 # Terminal 3
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 直接运行（无需编译）
 go run cmd/server/main.go --broker-url=tcp://localhost:1883 --namespace=default
@@ -205,7 +205,7 @@ INFO    Starting Task watcher
 
 ```bash
 # Terminal 4
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 直接运行（无需编译）
 go run cmd/agent/main.go \
@@ -233,7 +233,7 @@ INFO    Starting heartbeat (interval: 30s)
 
 ```bash
 # Terminal 5 (新开一个终端)
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 查看 Robot 资源
 kubectl get robots
@@ -445,7 +445,7 @@ ls -lt /var/lib/k8s4r/tasks/ | head -2 | tail -1 | awk '{print $NF}' | xargs -I 
 
 ```bash
 # Terminal 6
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 监听所有 k8s4r 相关的 MQTT 消息
 mosquitto_sub -h localhost -p 1883 -t "k8s4r/#" -v
@@ -862,7 +862,7 @@ INFO  task stopped successfully  taskUID=xxx
 ### 运行所有 Agent 测试
 
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 
 # 运行所有测试
 go test -v ./pkg/agent -timeout 60s
@@ -978,7 +978,7 @@ k8s4r/robots/robot-debug-001/tasks/state {"tasks":[{"uid":"xxx","state":"running
 
 **Terminal 1**:
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 ./config/mosquitto/start-mosquitto.sh simple
 ```
 
@@ -994,7 +994,7 @@ cd /Users/hxndg/code_test/k8s4r
 
 **Terminal 2**:
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 go run cmd/manager/main.go \
   --grpc-bind-address=:9090 \
   --namespace=default
@@ -1021,7 +1021,7 @@ lsof -i :9090
 
 **Terminal 3**:
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 go run cmd/server/main.go \
   --broker-url=tcp://localhost:1883 \
   --grpc-addr=localhost:9090
@@ -1058,7 +1058,7 @@ Connecting to MQTT broker broker=tcp://localhost:1883
 
 **Terminal 4**:
 ```bash
-cd /Users/hxndg/code_test/k8s4r
+cd $PROJECT_ROOT
 go run cmd/agent/main.go \
   --broker-url=tcp://localhost:1883 \
   --robot-id=robot-debug-001 \

@@ -40,7 +40,7 @@ type RobotManagerClient interface {
 	ReportRobotHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// 单向 RPC：Server 通知 Manager 任务状态变化
 	ReportTaskStatus(ctx context.Context, in *TaskStatusRequest, opts ...grpc.CallOption) (*TaskStatusResponse, error)
-	// ========== 🔥 双向流：Manager 推送任务给 Server ==========
+	// ==========  双向流：Manager 推送任务给 Server ==========
 	// Manager 监听 K8s Task 变化，通过此流推送给 Server
 	// Server 将任务转发到 MQTT
 	StreamTasks(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TaskEvent, TaskCommand], error)
@@ -112,7 +112,7 @@ type RobotManagerServer interface {
 	ReportRobotHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// 单向 RPC：Server 通知 Manager 任务状态变化
 	ReportTaskStatus(context.Context, *TaskStatusRequest) (*TaskStatusResponse, error)
-	// ========== 🔥 双向流：Manager 推送任务给 Server ==========
+	// ==========  双向流：Manager 推送任务给 Server ==========
 	// Manager 监听 K8s Task 变化，通过此流推送给 Server
 	// Server 将任务转发到 MQTT
 	StreamTasks(grpc.BidiStreamingServer[TaskEvent, TaskCommand]) error

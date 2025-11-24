@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
 // JobReconciler reconciles a Job object
@@ -54,7 +54,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Reconciling Job", "job", job.Name, "status", job.Status.Status)
+	logger.Info("Reconciling Job", "job", job.Name, "status", job.Status.State)
 
 	// 如果正在删除，清理
 	if job.DeletionTimestamp != nil {
@@ -62,8 +62,8 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// 初始化 Job 状态（如果是新创建的）
-	if job.Status.Status == "" {
-		job.Status.Status = "pending"
+	if job.Status.State == "" {
+		job.Status.State = robotv1alpha1.JobStatePending
 		job.Status.StatusDescription = "Job created, waiting for task groups"
 		if err := r.Status().Update(ctx, job); err != nil {
 			logger.Error(err, "Failed to initialize job status")
@@ -81,8 +81,8 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// 如果 Job 已经是终止状态（complete/failed），只更新状态不做其他操作
-	if job.Status.Status == "complete" || job.Status.Status == "failed" {
-		logger.Info("Job already in terminal state", "job", job.Name, "status", job.Status.Status)
+	if job.Status.State == robotv1alpha1.JobStateCompleted || job.Status.State == robotv1alpha1.JobStateFailed {
+		logger.Info("Job already in terminal state", "job", job.Name, "status", job.Status.State)
 		// 仍然检查一次状态，防止状态不一致
 		return ctrl.Result{}, r.updateJobStatus(ctx, job)
 	}
@@ -94,7 +94,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// 如果 Job 还在运行中，定期检查
-	if job.Status.Status == "running" || job.Status.Status == "pending" {
+	if job.Status.State == robotv1alpha1.JobStateRunning || job.Status.State == robotv1alpha1.JobStatePending {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -128,7 +128,7 @@ func (r *JobReconciler) updateJobStatus(ctx context.Context, job *robotv1alpha1.
 
 	if len(taskGroupList.Items) == 0 {
 		// 还没有创建 TaskGroup
-		job.Status.Status = "pending"
+		job.Status.State = robotv1alpha1.JobStatePending
 		job.Status.StatusDescription = "Creating task groups"
 		job.Status.TotalTasks = 0
 		job.Status.SucceededTasks = 0
@@ -152,7 +152,7 @@ func (r *JobReconciler) updateJobStatus(ctx context.Context, job *robotv1alpha1.
 		switch task.Status.State {
 		case robotv1alpha1.TaskStatePending, "":
 			pendingTasks++
-		case robotv1alpha1.TaskStateDispatching:
+		case robotv1alpha1.TaskStateScheduled:
 			dispatchingTasks++
 		case robotv1alpha1.TaskStateRunning:
 			runningTasks++
@@ -182,27 +182,27 @@ func (r *JobReconciler) updateJobStatus(ctx context.Context, job *robotv1alpha1.
 	//      只有所有 Task 都是 pending，Job 才是 pending
 	if succeededTasks == totalTasks && totalTasks > 0 {
 		// 所有 Task 都成功完成
-		job.Status.Status = "complete"
+		job.Status.State = robotv1alpha1.JobStateCompleted
 		job.Status.StatusDescription = fmt.Sprintf("All %d tasks completed successfully", totalTasks)
 	} else if succeededTasks+failedTasks == totalTasks && totalTasks > 0 {
 		// 所有 Task 都已结束（有失败）
-		job.Status.Status = "failed"
+		job.Status.State = robotv1alpha1.JobStateFailed
 		job.Status.StatusDescription = fmt.Sprintf("%d succeeded, %d failed out of %d tasks",
 			succeededTasks, failedTasks, totalTasks)
 	} else if dispatchingTasks > 0 || runningTasks > 0 {
 		// 只要有任何 Task 进入 dispatching 或 running，Job 就变为 running
-		job.Status.Status = "running"
+		job.Status.State = robotv1alpha1.JobStateRunning
 		job.Status.StatusDescription = fmt.Sprintf("Running: %d, Dispatching: %d, Succeeded: %d, Failed: %d, Pending: %d",
 			runningTasks, dispatchingTasks, succeededTasks, failedTasks, pendingTasks)
 	} else {
 		// 所有 Task 都是 pending
-		job.Status.Status = "pending"
+		job.Status.State = robotv1alpha1.JobStatePending
 		job.Status.StatusDescription = fmt.Sprintf("Waiting: %d pending tasks", pendingTasks)
 	}
 
 	logger.Info("Updated job status",
 		"job", job.Name,
-		"status", job.Status.Status,
+		"status", job.Status.State,
 		"total", totalTasks,
 		"succeeded", succeededTasks,
 		"running", runningTasks,
@@ -227,12 +227,12 @@ func (r *JobReconciler) ensureTaskGroupsForJob(ctx context.Context, job *robotv1
 
 	// 为每个 TaskGroupTemplate 创建 TaskGroup
 	for _, groupTemplate := range job.Spec.TaskGroups {
-		taskGroupName := job.Name + "-" + groupTemplate.Name
+		taskGroupNamePrefix := job.Name + "-" + groupTemplate.Name + "-"
 
-		// 检查是否已存在
+		// 检查是否已存在（通过 JobName 和 GroupName 匹配）
 		found := false
 		for _, existingGroup := range taskGroupList.Items {
-			if existingGroup.Name == taskGroupName {
+			if existingGroup.Spec.JobName == job.Name && existingGroup.Spec.GroupName == groupTemplate.Name {
 				found = true
 				break
 			}
@@ -242,13 +242,14 @@ func (r *JobReconciler) ensureTaskGroupsForJob(ctx context.Context, job *robotv1
 			continue
 		}
 
-		// 创建 TaskGroup CR
+		// 创建 TaskGroup CR（使用 GenerateName 自动生成唯一名称）
 		taskGroup := &robotv1alpha1.TaskGroup{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      taskGroupName,
-				Namespace: job.Namespace,
+				GenerateName: taskGroupNamePrefix, // Kubernetes 会自动添加随机后缀
+				Namespace:    job.Namespace,
 				Labels: map[string]string{
-					"job": job.Name,
+					"job":       job.Name,
+					"groupName": groupTemplate.Name,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{

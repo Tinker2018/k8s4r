@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
-	robotv1alpha1 "github.com/hxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndg/k8s4r/pkg/driver"
+	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
+	"github.com/hxndghxndg/k8s4r/pkg/driver"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )

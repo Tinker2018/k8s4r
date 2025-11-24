@@ -466,6 +466,25 @@ spec:
           status:
             description: TaskGroupStatus defines the observed state of TaskGroup
             properties:
+              assignedRobots:
+                description: |-
+                  AssignedRobots 调度决策：每个副本分配到的Robot
+                  Index 对应副本索引，RobotName 对应分配的Robot名称
+                items:
+                  description: RobotAssignment 定义副本到Robot的分配关系
+                  properties:
+                    replicaIndex:
+                      description: ReplicaIndex 副本索引（0-based）
+                      format: int32
+                      type: integer
+                    robotName:
+                      description: RobotName 分配的Robot名称
+                      type: string
+                  required:
+                  - replicaIndex
+                  - robotName
+                  type: object
+                type: array
               completedAt:
                 description: CompletedAt 完成时间
                 format: date-time

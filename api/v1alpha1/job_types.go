@@ -221,9 +221,9 @@ type EphemeralDisk struct {
 
 // JobStatus defines the observed state of Job
 type JobStatus struct {
-	// Status Job 整体状态
+	// State Job 当前状态
 	// +optional
-	Status string `json:"status,omitempty"`
+	State JobState `json:"state,omitempty"`
 
 	// StatusDescription 状态描述
 	// +optional
@@ -257,10 +257,35 @@ type JobStatus struct {
 	// +optional
 	PendingTasks int32 `json:"pendingTasks,omitempty"`
 
+	// TaskGroups 关联的TaskGroup资源列表
+	// +optional
+	TaskGroups []string `json:"taskGroups,omitempty"`
+
+	// Tasks 关联的Task资源列表
+	// +optional
+	Tasks []string `json:"tasks,omitempty"`
+
 	// TaskGroupSummary 任务组状态摘要
 	// +optional
 	TaskGroupSummary map[string]TaskGroupSummary `json:"taskGroupSummary,omitempty"`
 }
+
+// JobState 定义 Job 的状态
+type JobState string
+
+const (
+	// JobStatePending Job 刚创建，等待TaskGroup调度
+	JobStatePending JobState = "pending"
+
+	// JobStateRunning 至少有一个TaskGroup已调度(Scheduled)
+	JobStateRunning JobState = "running"
+
+	// JobStateCompleted 所有TaskGroup都已完成
+	JobStateCompleted JobState = "completed"
+
+	// JobStateFailed 有TaskGroup失败
+	JobStateFailed JobState = "failed"
+)
 
 // TaskGroupSummary 任务组状态摘要
 type TaskGroupSummary struct {
@@ -287,7 +312,7 @@ type TaskGroupSummary struct {
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:scope=Namespaced,shortName=rjob
 //+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
-//+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+//+kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 //+kubebuilder:printcolumn:name="Total",type=integer,JSONPath=`.status.totalTasks`,description="Total tasks"
 //+kubebuilder:printcolumn:name="Succeeded",type=integer,JSONPath=`.status.succeededTasks`,description="Succeeded tasks"
 //+kubebuilder:printcolumn:name="Failed",type=integer,JSONPath=`.status.failedTasks`,description="Failed tasks"

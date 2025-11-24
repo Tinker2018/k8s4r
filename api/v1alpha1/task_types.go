@@ -481,13 +481,13 @@ type TaskStatus struct {
 type TaskState string
 
 const (
-	// TaskStatePending 等待调度
+	// TaskStatePending 等待调度（Task刚创建）
 	TaskStatePending TaskState = "pending"
 
-	// TaskStateDispatching 正在分发到 Robot（触发 Server 转发）
-	TaskStateDispatching TaskState = "dispatching"
+	// TaskStateScheduled Server已发布到MQTT，等待Agent执行
+	TaskStateScheduled TaskState = "scheduled"
 
-	// TaskStateRunning 运行中
+	// TaskStateRunning Agent正在执行
 	TaskStateRunning TaskState = "running"
 
 	// TaskStateExited 已退出（无论 exitCode 是否为 0）

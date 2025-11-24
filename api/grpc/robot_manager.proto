@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package grpc;
 
-option go_package = "github.com/hxndg/k8s4r/api/grpc";
+option go_package = "github.com/hxndghxndg/k8s4r/api/grpc";
 
 // RobotManager 服务定义
 // ========== 双向通信架构 ==========
@@ -18,7 +18,7 @@ service RobotManager {
   // 单向 RPC：Server 通知 Manager 任务状态变化
   rpc ReportTaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
   
-  // ========== 🔥 双向流：Manager 推送任务给 Server ==========
+  // ==========  双向流：Manager 推送任务给 Server ==========
   // Manager 监听 K8s Task 变化，通过此流推送给 Server
   // Server 将任务转发到 MQTT
   rpc StreamTasks(stream TaskEvent) returns (stream TaskCommand);
@@ -69,7 +69,7 @@ message TaskStatusResponse {
   string message = 2;
 }
 
-// ===== 🔥 双向流：任务推送 =====
+// =====  双向流：任务推送 =====
 
 // TaskCommand Manager → Server 的指令
 message TaskCommand {
