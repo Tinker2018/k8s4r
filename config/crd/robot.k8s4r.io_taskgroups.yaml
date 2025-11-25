@@ -111,6 +111,304 @@ spec:
               groupName:
                 description: GroupName TaskGroup 在 Job 中的名称
                 type: string
+              initTasks:
+                description: |-
+                  InitTasks 初始化任务列表（类似 K8s initContainers）
+                  在 Tasks 之前按顺序执行，用于环境准备、依赖下载等
+                items:
+                  description: TaskDefinition 定义 Task 模板（用于 Job 中）
+                  properties:
+                    artifacts:
+                      description: Artifacts 需要下载的文件
+                      items:
+                        description: TaskArtifact 任务工件
+                        properties:
+                          getterMode:
+                            description: GetterMode 下载模式
+                            enum:
+                            - any
+                            - file
+                            - dir
+                            type: string
+                          getterOptions:
+                            additionalProperties:
+                              type: string
+                            description: GetterOptions 下载选项
+                            type: object
+                          getterSource:
+                            description: GetterSource 下载源（支持 http, git, s3 等）
+                            type: string
+                          relativeDest:
+                            description: RelativeDest 相对目标路径
+                            type: string
+                        required:
+                        - getterSource
+                        type: object
+                      type: array
+                    config:
+                      description: Config 驱动程序配置
+                      properties:
+                        dockerConfig:
+                          description: DockerConfig 用于 docker 驱动
+                          properties:
+                            args:
+                              description: Args 命令参数
+                              items:
+                                type: string
+                              type: array
+                            command:
+                              description: Command 容器启动命令
+                              items:
+                                type: string
+                              type: array
+                            image:
+                              description: Image Docker 镜像
+                              type: string
+                            networkMode:
+                              description: NetworkMode 网络模式
+                              type: string
+                            ports:
+                              description: Ports 端口映射
+                              items:
+                                description: DockerPortMapping Docker 端口映射
+                                properties:
+                                  hostIP:
+                                    description: HostIP 绑定的主机IP
+                                    type: string
+                                  label:
+                                    description: Label 端口标签
+                                    type: string
+                                  to:
+                                    description: To 映射到的主机端口（可选）
+                                    format: int32
+                                    type: integer
+                                  value:
+                                    description: Value 端口号
+                                    format: int32
+                                    type: integer
+                                required:
+                                - label
+                                - value
+                                type: object
+                              type: array
+                            volumes:
+                              description: Volumes 卷挂载
+                              items:
+                                description: DockerVolumeMount Docker 卷挂载
+                                properties:
+                                  readOnly:
+                                    description: ReadOnly 是否只读
+                                    type: boolean
+                                  source:
+                                    description: Source 主机源路径
+                                    type: string
+                                  target:
+                                    description: Target 容器内目标路径
+                                    type: string
+                                required:
+                                - source
+                                - target
+                                type: object
+                              type: array
+                            workDir:
+                              description: WorkDir 工作目录
+                              type: string
+                          required:
+                          - image
+                          type: object
+                        execConfig:
+                          description: ExecConfig 用于 exec 和 raw_exec 驱动
+                          properties:
+                            args:
+                              description: Args 命令参数
+                              items:
+                                type: string
+                              type: array
+                            command:
+                              description: Command 要执行的命令
+                              type: string
+                          required:
+                          - command
+                          type: object
+                        javaConfig:
+                          description: JavaConfig 用于 java 驱动
+                          properties:
+                            args:
+                              description: Args 应用程序参数
+                              items:
+                                type: string
+                              type: array
+                            class:
+                              description: Class 主类名（如果不是可执行 JAR）
+                              type: string
+                            classpath:
+                              description: ClassPath 类路径
+                              items:
+                                type: string
+                              type: array
+                            jarPath:
+                              description: JarPath JAR 文件路径
+                              type: string
+                            jvmOptions:
+                              description: JvmOptions JVM 选项
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - jarPath
+                          type: object
+                      type: object
+                    daemon:
+                      description: |-
+                        Daemon 是否为守护进程模式（用于 initTasks）
+                        当设置为 true 时，任务启动后不等待其完成即继续执行后续任务
+                        主要用于启动长期运行的后台服务（如 SPIRE Agent、Envoy 等）
+                      type: boolean
+                    driver:
+                      description: Driver 驱动程序类型
+                      enum:
+                      - exec
+                      - docker
+                      - java
+                      - raw_exec
+                      type: string
+                    env:
+                      additionalProperties:
+                        type: string
+                      description: Env 环境变量
+                      type: object
+                    killTimeout:
+                      description: KillTimeout 终止超时
+                      type: string
+                    name:
+                      description: Name 任务名称
+                      type: string
+                    resources:
+                      description: Resources 资源需求
+                      properties:
+                        cpu:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: CPU CPU 资源请求和限制
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        disk:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: Disk 磁盘空间需求
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        iops:
+                          description: IOPS 磁盘 IOPS 需求
+                          format: int64
+                          type: integer
+                        memory:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: Memory 内存资源请求和限制
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        networks:
+                          description: Networks 网络资源需求
+                          items:
+                            description: TaskNetworkResource 网络资源定义
+                            properties:
+                              dynamicPorts:
+                                description: DynamicPorts 动态端口
+                                items:
+                                  description: TaskPort 端口定义
+                                  properties:
+                                    label:
+                                      description: Label 端口标签
+                                      type: string
+                                    to:
+                                      description: To 映射到的端口（对于动态端口）
+                                      format: int32
+                                      type: integer
+                                    value:
+                                      description: Value 端口值（对于保留端口）
+                                      format: int32
+                                      type: integer
+                                  required:
+                                  - label
+                                  type: object
+                                type: array
+                              mbits:
+                                description: MBits 网络带宽需求 (Mbps)
+                                format: int32
+                                type: integer
+                              reservedPorts:
+                                description: ReservedPorts 保留端口
+                                items:
+                                  description: TaskPort 端口定义
+                                  properties:
+                                    label:
+                                      description: Label 端口标签
+                                      type: string
+                                    to:
+                                      description: To 映射到的端口（对于动态端口）
+                                      format: int32
+                                      type: integer
+                                    value:
+                                      description: Value 端口值（对于保留端口）
+                                      format: int32
+                                      type: integer
+                                  required:
+                                  - label
+                                  type: object
+                                type: array
+                            type: object
+                          type: array
+                      type: object
+                    templates:
+                      description: Templates 配置模板
+                      items:
+                        description: TaskTemplate 配置模板
+                        properties:
+                          changeMode:
+                            description: ChangeMode 变更模式
+                            enum:
+                            - restart
+                            - noop
+                            - signal
+                            type: string
+                          changeSignal:
+                            description: ChangeSignal 变更信号
+                            type: string
+                          destPath:
+                            description: DestPath 目标文件路径
+                            type: string
+                          embeddedTmpl:
+                            description: EmbeddedTmpl 内嵌模板内容
+                            type: string
+                          leftDelim:
+                            description: LeftDelim 左分隔符
+                            type: string
+                          perms:
+                            description: Perms 文件权限
+                            type: string
+                          rightDelim:
+                            description: RightDelim 右分隔符
+                            type: string
+                          sourcePath:
+                            description: SourcePath 模板源路径
+                            type: string
+                        required:
+                        - destPath
+                        type: object
+                      type: array
+                    user:
+                      description: User 运行用户
+                      type: string
+                  required:
+                  - config
+                  - driver
+                  - name
+                  type: object
+                type: array
               jobName:
                 description: JobName 所属的 Job 名称
                 type: string
@@ -118,6 +416,68 @@ spec:
                 additionalProperties:
                   type: string
                 description: Meta 元数据
+                type: object
+              network:
+                description: Network 网络代理配置
+                properties:
+                  enabled:
+                    description: Enabled 是否启用网络代理
+                    type: boolean
+                  spiffe:
+                    description: SPIFFE SPIFFE/SPIRE 配置
+                    properties:
+                      agentSocketPath:
+                        default: /run/spire/sockets/agent.sock
+                        description: AgentSocketPath SPIRE Agent Unix Socket 路径
+                        type: string
+                      trustDomain:
+                        description: TrustDomain SPIFFE 信任域
+                        type: string
+                    required:
+                    - trustDomain
+                    type: object
+                  type:
+                    default: envoy
+                    description: Type 代理类型 (envoy/none)
+                    enum:
+                    - envoy
+                    - none
+                    type: string
+                  upstreams:
+                    description: Upstreams 上游服务配置列表
+                    items:
+                      description: ProxyUpstream 上游服务配置
+                      properties:
+                        localPort:
+                          description: LocalPort 本地监听端口（业务进程连接此端口）
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        name:
+                          description: Name 服务名称（用于标识）
+                          type: string
+                        protocol:
+                          default: tcp
+                          description: Protocol 协议类型
+                          enum:
+                          - tcp
+                          - http
+                          - grpc
+                          type: string
+                        tls:
+                          default: true
+                          description: TLS 是否使用 TLS
+                          type: boolean
+                        upstream:
+                          description: Upstream 上游服务地址 (host:port)
+                          type: string
+                      required:
+                      - localPort
+                      - name
+                      - upstream
+                      type: object
+                    type: array
                 type: object
               reschedulePolicy:
                 description: ReschedulePolicy 重新调度策略
@@ -311,6 +671,12 @@ spec:
                           - jarPath
                           type: object
                       type: object
+                    daemon:
+                      description: |-
+                        Daemon 是否为守护进程模式（用于 initTasks）
+                        当设置为 true 时，任务启动后不等待其完成即继续执行后续任务
+                        主要用于启动长期运行的后台服务（如 SPIRE Agent、Envoy 等）
+                      type: boolean
                     driver:
                       description: Driver 驱动程序类型
                       enum:

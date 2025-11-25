@@ -283,6 +283,8 @@ func (r *TaskGroupReconciler) createTasks(ctx context.Context, taskGroup *robotv
 					KillTimeout:   taskDef.KillTimeout,
 					Artifacts:     taskDef.Artifacts,
 					Templates:     taskDef.Templates,
+					Network:       taskGroup.Spec.Network,   // 传递网络配置
+					InitTasks:     taskGroup.Spec.InitTasks, // 传递初始化任务
 				},
 			}
 

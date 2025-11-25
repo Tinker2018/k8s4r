@@ -29,6 +29,11 @@ type TaskGroupSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Count int32 `json:"count"`
 
+	// InitTasks 初始化任务列表（类似 K8s initContainers）
+	// 在 Tasks 之前按顺序执行，用于环境准备、依赖下载等
+	// +optional
+	InitTasks []TaskDefinition `json:"initTasks,omitempty"`
+
 	// Tasks 任务定义列表（从 Job 的 TaskGroupTemplate 复制）
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
@@ -53,6 +58,10 @@ type TaskGroupSpec struct {
 	// Meta 元数据
 	// +optional
 	Meta map[string]string `json:"meta,omitempty"`
+
+	// Network 网络代理配置
+	// +optional
+	Network *NetworkProxy `json:"network,omitempty"`
 }
 
 // TaskGroupStatus defines the observed state of TaskGroup

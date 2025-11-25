@@ -343,6 +343,12 @@ spec:
                                 - jarPath
                                 type: object
                             type: object
+                          daemon:
+                            description: |-
+                              Daemon 是否为守护进程模式（用于 initTasks）
+                              当设置为 true 时，任务启动后不等待其完成即继续执行后续任务
+                              主要用于启动长期运行的后台服务（如 SPIRE Agent、Envoy 等）
+                            type: boolean
                           driver:
                             description: Driver 驱动程序类型
                             enum:

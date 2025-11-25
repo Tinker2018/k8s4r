@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,15 +19,19 @@ import (
 
 // TaskExecutor 负责在 Agent 端执行任务
 type TaskExecutor struct {
-	robotName   string
-	mqttClient  mqtt.Client
-	driver      driver.TaskDriver
-	tasks       map[string]*runningTask
-	tasksMu     sync.RWMutex
-	logger      Logger
-	workDir     string
-	monitorStop chan struct{} // 用于停止 monitor 协程
-	monitorOnce sync.Once     // 确保 monitor 只启动一次
+	robotName         string
+	mqttClient        mqtt.Client
+	driver            driver.TaskDriver
+	tasks             map[string]*runningTask
+	tasksMu           sync.RWMutex
+	logger            Logger
+	workDir           string
+	monitorStop       chan struct{}                 // 用于停止 monitor 协程
+	monitorOnce       sync.Once                     // 确保 monitor 只启动一次
+	initTasksComplete map[string]bool               // 记录哪些 TaskGroup 的 initTasks 已完成
+	initTasksMu       sync.RWMutex                  // 保护 initTasksComplete
+	daemonProcesses   map[string]*driver.TaskHandle // 记录后台守护进程
+	daemonMu          sync.RWMutex                  // 保护 daemonProcesses
 }
 
 // runningTask 代表一个运行中的任务
@@ -93,13 +99,15 @@ func NewTaskExecutor(robotName string, mqttClient mqtt.Client, workDir string, l
 	logger.Info("task executor initialized", "workDir", workDir)
 
 	te := &TaskExecutor{
-		robotName:   robotName,
-		mqttClient:  mqttClient,
-		driver:      taskDriver,
-		tasks:       make(map[string]*runningTask),
-		logger:      logger,
-		workDir:     workDir,
-		monitorStop: make(chan struct{}),
+		robotName:         robotName,
+		mqttClient:        mqttClient,
+		driver:            taskDriver,
+		tasks:             make(map[string]*runningTask),
+		logger:            logger,
+		workDir:           workDir,
+		monitorStop:       make(chan struct{}),
+		initTasksComplete: make(map[string]bool),
+		daemonProcesses:   make(map[string]*driver.TaskHandle),
 	}
 
 	// 设置驱动的事件回调，用于上报执行阶段
@@ -291,10 +299,117 @@ func (te *TaskExecutor) createTask(ctx context.Context, task *robotv1alpha1.Task
 	te.reportStatusWithEvent(taskUID, "pending", 0, fmt.Sprintf("Task assigned to robot %s", te.robotName), "Assigned", nil)
 	te.logger.Info("task assigned and acknowledged", "taskUID", taskUID)
 
-	// 创建任务上下文
+	// 1. 执行 initTasks（如果这个 TaskGroup 的 initTasks 还未执行）
+	taskGroupName := task.Spec.TaskGroupName
+	if taskGroupName != "" {
+		if err := te.executeInitTasks(ctx, taskGroupName, task); err != nil {
+			te.logger.Error("failed to execute initTasks", "error", err, "taskGroup", taskGroupName)
+			te.reportStatusWithEvent(taskUID, "failed", -1, fmt.Sprintf("InitTasks failed: %v", err), "InitTasksFailed", nil)
+			return
+		}
+	}
+
+	// 2. 如果启用了网络代理，生成 Envoy 配置并启动
+	if task.Spec.Network != nil && task.Spec.Network.Enabled && taskGroupName != "" {
+		// 检查 Envoy 是否已经为这个 TaskGroup 启动
+		te.daemonMu.RLock()
+		envoyKey := fmt.Sprintf("%s-envoy", taskGroupName)
+		_, envoyRunning := te.daemonProcesses[envoyKey]
+		te.daemonMu.RUnlock()
+
+		if !envoyRunning {
+			te.logger.Info("generating envoy config and starting proxy", "taskGroup", taskGroupName)
+
+			// 生成 Envoy 配置文件
+			configDir := filepath.Join(te.workDir, "envoy")
+			configPath, err := generateEnvoyConfig(taskGroupName, task.Spec.Network, configDir)
+			if err != nil {
+				te.logger.Error("failed to generate envoy config", "error", err)
+				te.reportStatusWithEvent(taskUID, "failed", -1, fmt.Sprintf("Failed to generate envoy config: %v", err), "EnvoyConfigFailed", nil)
+				return
+			}
+			te.logger.Info("envoy config generated", "path", configPath)
+
+			// 构造启动 Envoy 的 Task
+			envoyTask := &robotv1alpha1.Task{
+				Spec: robotv1alpha1.TaskSpec{
+					Name:   "envoy-proxy",
+					Driver: robotv1alpha1.TaskDriverExec,
+					Config: robotv1alpha1.TaskDriverConfig{
+						ExecConfig: &robotv1alpha1.ExecDriverConfig{
+							Command: "/opt/k8s4r/bin/envoy",
+							Args:    []string{"-c", configPath},
+						},
+					},
+				},
+			}
+			envoyTask.Name = fmt.Sprintf("%s-envoy", taskGroupName)
+			envoyTask.UID = types.UID(fmt.Sprintf("%s-envoy", taskGroupName))
+
+			// 启动 Envoy
+			handle, err := te.driver.Start(ctx, envoyTask)
+			if err != nil {
+				te.logger.Error("failed to start envoy", "error", err)
+				te.reportStatusWithEvent(taskUID, "failed", -1, fmt.Sprintf("Failed to start envoy: %v", err), "EnvoyStartFailed", nil)
+				return
+			}
+
+			// 保存 Envoy 进程句柄
+			te.daemonMu.Lock()
+			te.daemonProcesses[envoyKey] = handle
+			te.daemonMu.Unlock()
+
+			te.logger.Info("envoy started successfully", "pid", handle.PID)
+
+			// 等待 Envoy 就绪（简单等待）
+			time.Sleep(2 * time.Second)
+		} else {
+			te.logger.Info("envoy already running for taskgroup", "taskGroup", taskGroupName)
+		}
+	}
+
+	// 3. 创建任务上下文
 	taskCtx, cancel := context.WithCancel(ctx)
 
-	// 启动任务（包含 artifact 下载）
+	// 4. 如果启用了网络代理，自动注入环境变量
+	if task.Spec.Network != nil && task.Spec.Network.Enabled {
+		if task.Spec.Env == nil {
+			task.Spec.Env = make(map[string]string)
+		}
+
+		// 为每个 upstream 自动注入环境变量
+		for _, upstream := range task.Spec.Network.Upstreams {
+			// 注入代理端口（业务进程连接这个端口）
+			envKey := fmt.Sprintf("PROXY_%s_PORT", strings.ToUpper(upstream.Name))
+			task.Spec.Env[envKey] = fmt.Sprintf("%d", upstream.LocalPort)
+
+			// 注入代理地址（127.0.0.1:port）
+			envKey = fmt.Sprintf("PROXY_%s_ADDR", strings.ToUpper(upstream.Name))
+			task.Spec.Env[envKey] = fmt.Sprintf("127.0.0.1:%d", upstream.LocalPort)
+
+			// 根据协议注入连接字符串
+			switch upstream.Protocol {
+			case "tcp":
+				if upstream.Name == "database" || strings.Contains(upstream.Name, "db") {
+					// 数据库连接字符串
+					task.Spec.Env["DATABASE_HOST"] = "127.0.0.1"
+					task.Spec.Env["DATABASE_PORT"] = fmt.Sprintf("%d", upstream.LocalPort)
+					task.Spec.Env["DATABASE_URL"] = fmt.Sprintf("postgresql://127.0.0.1:%d/mydb", upstream.LocalPort)
+				}
+			case "http", "grpc":
+				envKey = fmt.Sprintf("%s_URL", strings.ToUpper(upstream.Name))
+				protocol := "http"
+				if upstream.TLS {
+					protocol = "https"
+				}
+				task.Spec.Env[envKey] = fmt.Sprintf("%s://127.0.0.1:%d", protocol, upstream.LocalPort)
+			}
+		}
+
+		te.logger.Info("injected proxy environment variables", "taskUID", taskUID, "envCount", len(task.Spec.Env))
+	}
+
+	// 5. 启动任务（包含 artifact 下载）
 	handle, err := te.driver.Start(taskCtx, task)
 	if err != nil {
 		cancel()
@@ -323,6 +438,118 @@ func (te *TaskExecutor) createTask(ctx context.Context, task *robotv1alpha1.Task
 
 	// 注意：不再为每个任务启动单独的 monitor 协程
 	// 统一的 monitor 协程会轮询所有任务
+}
+
+// executeInitTasks 执行 TaskGroup 的初始化任务
+func (te *TaskExecutor) executeInitTasks(ctx context.Context, taskGroupName string, task *robotv1alpha1.Task) error {
+	// 检查是否已经执行过这个 TaskGroup 的 initTasks
+	te.initTasksMu.RLock()
+	completed := te.initTasksComplete[taskGroupName]
+	te.initTasksMu.RUnlock()
+
+	if completed {
+		te.logger.Info("initTasks already completed for taskgroup", "taskGroup", taskGroupName)
+		return nil
+	}
+
+	// 获取 initTasks 列表
+	initTasks := task.Spec.InitTasks
+	if len(initTasks) == 0 {
+		te.logger.Info("no initTasks defined for taskgroup", "taskGroup", taskGroupName)
+		te.initTasksMu.Lock()
+		te.initTasksComplete[taskGroupName] = true
+		te.initTasksMu.Unlock()
+		return nil
+	}
+
+	te.logger.Info("executing initTasks for taskgroup", "taskGroup", taskGroupName, "count", len(initTasks))
+
+	// 按顺序执行每个 initTask
+	for i, initTaskDef := range initTasks {
+		te.logger.Info("executing initTask",
+			"taskGroup", taskGroupName,
+			"index", i+1,
+			"name", initTaskDef.Name,
+			"daemon", initTaskDef.Daemon)
+
+		// 构造临时 Task 对象用于执行
+		initTask := &robotv1alpha1.Task{
+			Spec: robotv1alpha1.TaskSpec{
+				Name:        initTaskDef.Name,
+				Driver:      initTaskDef.Driver,
+				Config:      initTaskDef.Config,
+				Env:         initTaskDef.Env,
+				User:        initTaskDef.User,
+				KillTimeout: initTaskDef.KillTimeout,
+				Artifacts:   initTaskDef.Artifacts,
+				Templates:   initTaskDef.Templates,
+			},
+		}
+		initTask.Name = fmt.Sprintf("%s-init-%s", taskGroupName, initTaskDef.Name)
+		initTask.UID = types.UID(fmt.Sprintf("%s-init-%d", taskGroupName, i))
+
+		// 启动 initTask
+		handle, err := te.driver.Start(ctx, initTask)
+		if err != nil {
+			return fmt.Errorf("failed to start initTask %s: %w", initTaskDef.Name, err)
+		}
+
+		// 如果是 daemon 进程，启动后不等待，直接继续
+		if initTaskDef.Daemon {
+			te.logger.Info("initTask started as daemon", "name", initTaskDef.Name, "pid", handle.PID)
+
+			// 保存 daemon 进程句柄
+			te.daemonMu.Lock()
+			daemonKey := fmt.Sprintf("%s-%s", taskGroupName, initTaskDef.Name)
+			te.daemonProcesses[daemonKey] = handle
+			te.daemonMu.Unlock()
+
+			continue
+		}
+
+		// 非 daemon 进程，等待其完成
+		te.logger.Info("waiting for initTask to complete", "name", initTaskDef.Name)
+
+		// 轮询等待任务完成
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("initTask %s cancelled: %w", initTaskDef.Name, ctx.Err())
+			case <-ticker.C:
+				status, err := te.driver.Status(ctx, handle)
+				if err != nil {
+					return fmt.Errorf("failed to get initTask status: %w", err)
+				}
+
+				if status.State == driver.TaskStateExited {
+					if status.ExitCode != 0 {
+						return fmt.Errorf("initTask %s failed with exit code %d", initTaskDef.Name, status.ExitCode)
+					}
+					te.logger.Info("initTask completed successfully", "name", initTaskDef.Name)
+					break
+				} else if status.State == driver.TaskStateFailed {
+					return fmt.Errorf("initTask %s failed: %s", initTaskDef.Name, status.Message)
+				}
+			}
+
+			// 如果已退出，跳出等待循环
+			status, _ := te.driver.Status(ctx, handle)
+			if status.State == driver.TaskStateExited {
+				break
+			}
+		}
+	}
+
+	// 标记 initTasks 完成
+	te.initTasksMu.Lock()
+	te.initTasksComplete[taskGroupName] = true
+	te.initTasksMu.Unlock()
+
+	te.logger.Info("all initTasks completed successfully", "taskGroup", taskGroupName)
+	return nil
 }
 
 // startMonitor 启动统一的任务监控协程（只启动一次）

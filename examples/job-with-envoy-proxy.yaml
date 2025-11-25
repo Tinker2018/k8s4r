@@ -1,0 +1,213 @@
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-proxy-job
+  namespace: default
+spec:
+  name: test-proxy-job
+  
+  # 空 selector 匹配所有 Online 的 Robot
+  robotSelector: {}
+  
+  type: batch
+  priority: 100
+  
+  taskGroups:
+    - name: proxy-group
+      count: 1  # 创建 1 个 TaskGroup 实例
+      
+      # 初始化任务（只负责安装二进制文件和基础环境准备）
+      initTasks:
+        # 1. 创建必要的目录结构
+        - name: prepare-directories
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  #!/bin/bash
+                  set -e
+                  
+                  echo "Creating directory structure..."
+                  mkdir -p /opt/k8s4r/bin
+                  mkdir -p /etc/spire/agent
+                  mkdir -p /var/lib/spire/agent
+                  mkdir -p /run/spire/sockets
+                  
+                  echo "Directories created successfully"
+        
+        # 2. 生成 SPIRE Agent 配置（声明式配置转换为实际配置文件）
+        - name: generate-spire-config
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  #!/bin/bash
+                  set -e
+                  
+                  echo "Generating SPIRE Agent configuration..."
+                  
+                  # 从 TaskGroup 的 network.spiffe 配置中读取参数
+                  TRUST_DOMAIN="example.org"
+                  SOCKET_PATH="/run/spire/sockets/agent.sock"
+                  
+                  cat > /etc/spire/agent/agent.conf <<EOF
+                  agent {
+                    data_dir = "/var/lib/spire/agent"
+                    log_level = "DEBUG"
+                    server_address = "spire-server.example.com"
+                    server_port = "8081"
+                    socket_path = "${SOCKET_PATH}"
+                    trust_domain = "${TRUST_DOMAIN}"
+                  }
+                  
+                  plugins {
+                    NodeAttestor "join_token" {
+                      plugin_data {
+                        # Join token 应该通过环境变量传入
+                      }
+                    }
+                    
+                    KeyManager "memory" {
+                      plugin_data {}
+                    }
+                    
+                    WorkloadAttestor "unix" {
+                      plugin_data {}
+                    }
+                  }
+                  EOF
+                  
+                  echo "SPIRE Agent configuration generated at /etc/spire/agent/agent.conf"
+        
+        # 3. 下载并安装 SPIRE Agent
+        - name: install-spire
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  #!/bin/bash
+                  set -e
+                  
+                  SPIRE_VERSION="1.8.0"
+                  INSTALL_DIR="/opt/k8s4r/bin"
+                  
+                  echo "Installing SPIRE Agent ${SPIRE_VERSION}..."
+                  
+                  # 下载 SPIRE
+                  cd /tmp
+                  curl -L -o spire.tar.gz \
+                    "https://github.com/spiffe/spire/releases/download/v${SPIRE_VERSION}/spire-${SPIRE_VERSION}-linux-amd64-musl.tar.gz"
+                  tar xzf spire.tar.gz
+                  
+                  # 复制二进制文件
+                  cp spire-${SPIRE_VERSION}/bin/spire-agent ${INSTALL_DIR}/
+                  chmod +x ${INSTALL_DIR}/spire-agent
+                  
+                  echo "SPIRE Agent installed successfully"
+        
+        # 2. 启动 SPIRE Agent（后台守护进程）
+        - name: start-spire-agent
+          driver: exec
+          daemon: true  # 标记为守护进程，启动后不等待
+          config:
+            execConfig:
+              command: /opt/k8s4r/bin/spire-agent
+              args:
+                - run
+                - -config
+                - /etc/spire/agent/agent.conf
+        
+        # 3. 下载并安装 Envoy
+        - name: install-envoy
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  #!/bin/bash
+                  set -e
+                  
+                  ENVOY_VERSION="1.28.0"
+                  INSTALL_DIR="/opt/k8s4r/bin"
+                  
+                  echo "Installing Envoy ${ENVOY_VERSION}..."
+                  mkdir -p ${INSTALL_DIR}
+                  
+                  # 下载 Envoy
+                  curl -L -o ${INSTALL_DIR}/envoy \
+                    "https://github.com/envoyproxy/envoy/releases/download/v${ENVOY_VERSION}/envoy-${ENVOY_VERSION}-linux-x86_64"
+                  chmod +x ${INSTALL_DIR}/envoy
+                  
+                  # 验证安装
+                  ${INSTALL_DIR}/envoy --version
+                  
+                  echo "Envoy installed successfully"
+      
+      # 网络代理配置（声明式，Agent 会根据此配置动态生成 Envoy 配置）
+      network:
+        enabled: true
+        type: envoy
+        spiffe:
+          trustDomain: example.org
+          agentSocketPath: /run/spire/sockets/agent.sock
+        upstreams:
+          # 配置数据库代理
+          - name: database
+            localPort: 5432
+            upstream: db.example.com:5432
+            protocol: tcp
+            tls: true
+          # 配置 API 代理
+          - name: api
+            localPort: 8080
+            upstream: api.example.com:443
+            protocol: http
+            tls: true
+      
+      tasks:
+        - name: app-task
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Application starting with Envoy sidecar..."
+                  echo "Agent auto-injected environment variables:"
+                  echo "  DATABASE_HOST=${DATABASE_HOST}"
+                  echo "  DATABASE_PORT=${DATABASE_PORT}"
+                  echo "  DATABASE_URL=${DATABASE_URL}"
+                  echo "  API_URL=${API_URL}"
+                  echo "  PROXY_DATABASE_ADDR=${PROXY_DATABASE_ADDR}"
+                  echo "  PROXY_API_ADDR=${PROXY_API_ADDR}"
+                  echo ""
+                  echo "Business process can now connect to:"
+                  echo "  - Database: ${DATABASE_URL}"
+                  echo "  - API: ${API_URL}"
+                  echo ""
+                  echo "Sleeping for 30 seconds..."
+                  sleep 30
+                  echo "Application completed"
+          
+          # 注意：不需要手动设置 env！
+          # Agent 会根据 network.upstreams 自动注入：
+          #   DATABASE_HOST=127.0.0.1
+          #   DATABASE_PORT=5432
+          #   DATABASE_URL=postgresql://127.0.0.1:5432/mydb
+          #   API_URL=https://127.0.0.1:8080
+          #   PROXY_DATABASE_PORT=5432
+          #   PROXY_DATABASE_ADDR=127.0.0.1:5432
+          #   PROXY_API_PORT=8080
+          #   PROXY_API_ADDR=127.0.0.1:8080

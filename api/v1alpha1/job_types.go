@@ -138,6 +138,12 @@ type TaskDefinition struct {
 	// Templates 配置模板
 	// +optional
 	Templates []TaskTemplate `json:"templates,omitempty"`
+
+	// Daemon 是否为守护进程模式（用于 initTasks）
+	// 当设置为 true 时，任务启动后不等待其完成即继续执行后续任务
+	// 主要用于启动长期运行的后台服务（如 SPIRE Agent、Envoy 等）
+	// +optional
+	Daemon bool `json:"daemon,omitempty"`
 }
 
 // Constraint 定义约束条件

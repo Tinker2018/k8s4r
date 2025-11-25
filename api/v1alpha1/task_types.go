@@ -84,6 +84,14 @@ type TaskSpec struct {
 	// Services 服务定义
 	// +optional
 	Services []TaskService `json:"services,omitempty"`
+
+	// Network 网络代理配置
+	// +optional
+	Network *NetworkProxy `json:"network,omitempty"`
+
+	// InitTasks 初始化任务列表（从 TaskGroup 复制）
+	// +optional
+	InitTasks []TaskDefinition `json:"initTasks,omitempty"`
 }
 
 // TaskDriverType 定义支持的任务驱动程序类型
@@ -569,6 +577,67 @@ type TaskAllocatedPort struct {
 	// HostIP 主机IP
 	// +optional
 	HostIP string `json:"hostIP,omitempty"`
+}
+
+// NetworkProxy 网络代理配置
+type NetworkProxy struct {
+	// Enabled 是否启用网络代理
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Type 代理类型 (envoy/none)
+	// +optional
+	// +kubebuilder:validation:Enum=envoy;none
+	// +kubebuilder:default=envoy
+	Type string `json:"type,omitempty"`
+
+	// SPIFFE SPIFFE/SPIRE 配置
+	// +optional
+	SPIFFE *SPIFFEConfig `json:"spiffe,omitempty"`
+
+	// Upstreams 上游服务配置列表
+	// +optional
+	Upstreams []ProxyUpstream `json:"upstreams,omitempty"`
+}
+
+// SPIFFEConfig SPIFFE/SPIRE 配置
+type SPIFFEConfig struct {
+	// TrustDomain SPIFFE 信任域
+	// +kubebuilder:validation:Required
+	TrustDomain string `json:"trustDomain"`
+
+	// AgentSocketPath SPIRE Agent Unix Socket 路径
+	// +optional
+	// +kubebuilder:default=/run/spire/sockets/agent.sock
+	AgentSocketPath string `json:"agentSocketPath,omitempty"`
+}
+
+// ProxyUpstream 上游服务配置
+type ProxyUpstream struct {
+	// Name 服务名称（用于标识）
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// LocalPort 本地监听端口（业务进程连接此端口）
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	LocalPort int32 `json:"localPort"`
+
+	// Upstream 上游服务地址 (host:port)
+	// +kubebuilder:validation:Required
+	Upstream string `json:"upstream"`
+
+	// Protocol 协议类型
+	// +optional
+	// +kubebuilder:validation:Enum=tcp;http;grpc
+	// +kubebuilder:default=tcp
+	Protocol string `json:"protocol,omitempty"`
+
+	// TLS 是否使用 TLS
+	// +optional
+	// +kubebuilder:default=true
+	TLS bool `json:"tls,omitempty"`
 }
 
 //+kubebuilder:object:root=true
