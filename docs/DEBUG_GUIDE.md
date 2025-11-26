@@ -4,7 +4,26 @@
 
 ## ⚡ 重要更新
 
-### 最新特性（2025-11-21）
+### 最新特性（2025-11-26）
+
+**TaskGroup 架构升级**:
+- ✅ TaskGroup 作为执行单元（类似 Kubernetes Pod）
+- ✅ Agent 使用 TaskGroupManager 管理所有 TaskGroup
+- ✅ 每个 TaskGroup 拥有独立的 TaskExecutor 实例
+- ✅ 同一 TaskGroup 内的 Tasks 可以互相看见（通过 GetAllTasks）
+- ✅ 不同 TaskGroup 之间的 Tasks 完全隔离
+- ✅ Manager 通过 TaskGroupWatcher 自动推送 scheduled 状态的 TaskGroup
+- ✅ gRPC Stream 使用 TaskGroupCommand/TaskGroupEvent 通信
+- ✅ MQTT Topic 更新：
+  - `robot/{robotName}/taskgroup` - Agent 接收 TaskGroup
+  - `robot/{robotName}/taskgroup/status` - Agent 上报 TaskGroup 状态
+
+**InitTask 守护进程支持**:
+- ✅ daemon=true 的 InitTask 持续运行
+- ✅ 2 秒健康检查确保守护进程启动成功
+- ✅ TaskGroup 结束时自动清理所有守护进程
+
+### 历史特性（2025-11-21）
 
 **三层资源架构**:
 - ✅ Job → TaskGroup → Task 层次化管理
@@ -1396,3 +1415,614 @@ kubectl delete robot robot-debug-001
 ```
 
 ---
+
+## 🔒 测试 InitTask 功能
+
+本节介绍如何测试 InitTask 功能，使用 `examples/test-inittask-simple.yaml` 进行验证。
+
+### 什么是 InitTask
+
+InitTask 用于在主任务执行前运行初始化任务，类似 Kubernetes 的 initContainers。典型应用场景：
+- 启动 Envoy Proxy 作为 Sidecar（守护进程模式）
+- 启动 SPIRE Agent 获取 mTLS 证书（守护进程模式）
+- 创建目录、下载配置文件（一次性任务）
+- 等待依赖服务就绪（一次性任务）
+
+**InitTask 特性：**
+- ✅ 按顺序执行多个 initTask
+- ✅ 支持守护进程模式（daemon: true）和一次性任务（daemon: false）
+- ✅ 同一 TaskGroup 的 initTask 只执行一次
+- ✅ 所有 initTask 完成后才启动主任务
+- ✅ **主任务完成后，daemon 进程自动清理**（不会成为孤儿进程）
+
+**Daemon 进程生命周期：**
+1. InitTask 以 `daemon: true` 启动时，进程在后台运行
+2. 进程句柄保存在 `daemonProcesses` map 中，key 为 `{taskGroupName}-{initTaskName}`
+3. 主任务完成时，自动调用 `cleanupDaemonProcesses()` 停止所有关联的 daemon 进程
+4. Agent 停止时，也会清理所有未清理的 daemon 进程
+
+### 快速测试步骤
+
+#### 步骤 1: 启动所有组件
+
+```bash
+# Terminal 1: MQTT Broker
+./config/mosquitto/start-mosquitto.sh simple
+
+# Terminal 2: Manager
+go run cmd/manager/main.go
+
+# Terminal 3: Server
+go run cmd/server/main.go --broker-url=tcp://localhost:1883
+
+# Terminal 4: Agent
+go run cmd/agent/main.go \
+  --broker-url=tcp://localhost:1883 \
+  --robot-id=robot-debug-001 \
+  --token=fixed-token-123
+```
+
+#### 步骤 2: 创建 Robot 资源
+
+```bash
+# Terminal 5
+kubectl apply -f - << 'EOF'
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Robot
+metadata:
+  name: robot-debug-001
+  namespace: default
+spec:
+  robotId: robot-debug-001
+status:
+  phase: Online
+EOF
+
+# 验证 Robot
+kubectl get robots
+```
+
+#### 步骤 3: 应用测试 Job
+
+```bash
+# 应用包含 InitTask 的测试 Job
+kubectl apply -f examples/test-inittask-simple.yaml
+
+# 观察资源创建
+kubectl get jobs
+kubectl get taskgroups
+kubectl get tasks -w
+```
+
+#### 步骤 4: 观察 Agent 日志
+
+在 Terminal 4（Agent）中，你应该看到：
+
+```
+2025/11/26 18:00:00 executing initTasks for taskgroup: test-group, count: 4
+
+# 1. 第一个 initTask (非守护进程，创建目录)
+2025/11/26 18:00:00 executing initTask: index=1, name=setup-dirs, daemon=false
+2025/11/26 18:00:01 initTask completed successfully: setup-dirs
+
+# 2. 第二个 initTask (守护进程，模拟 SPIRE Agent)
+2025/11/26 18:00:01 executing initTask: index=2, name=mock-spire-agent, daemon=true
+2025/11/26 18:00:01 initTask started as daemon: mock-spire-agent, pid: 12345
+
+# 3. 第三个 initTask (非守护进程，等待 socket)
+2025/11/26 18:00:01 executing initTask: index=3, name=wait-socket, daemon=false
+2025/11/26 18:00:02 initTask completed successfully: wait-socket
+
+# 4. 第四个 initTask (守护进程，模拟 Envoy)
+2025/11/26 18:00:02 executing initTask: index=4, name=mock-envoy, daemon=true
+2025/11/26 18:00:02 initTask started as daemon: mock-envoy, pid: 12346
+
+# initTask 全部完成，启动主任务
+2025/11/26 18:00:02 all initTasks completed successfully: test-group
+2025/11/26 18:00:02 Starting main task: main-task
+```
+
+#### 步骤 5: 验证 InitTask 效果
+
+**检查守护进程：**
+```bash
+# 查看 mock SPIRE Agent 和 Envoy 进程
+ps aux | grep "Mock SPIRE Agent"
+ps aux | grep "Mock Envoy"
+
+# 应该看到两个正在运行的 bash 进程
+```
+
+**检查创建的文件：**
+```bash
+# 查看 initTask 创建的目录和文件
+ls -la /tmp/k8s4r-test/run/spire/sockets/
+ls -la /tmp/k8s4r-test/config/
+
+# 应该看到 agent.sock 文件
+```
+
+**检查主任务状态：**
+```bash
+# 查看 Task 状态
+kubectl get tasks
+
+# 查看详细信息
+kubectl describe task $(kubectl get tasks -o name | head -1)
+
+# 主任务应该报告: "✓ Socket file exists - InitTasks executed successfully!"
+```
+
+#### 步骤 6: 监控 MQTT（可选）
+
+```bash
+# Terminal 6: 监控任务分发
+mosquitto_sub -h localhost -t 'k8s4r/robots/robot-debug-001/tasks/dispatch' -v
+
+# Terminal 7: 监控状态上报
+mosquitto_sub -h localhost -t 'k8s4r/robots/+/tasks/+/status' -v
+```
+
+### 测试成功标志
+
+✅ **TaskGroup 创建成功**
+```bash
+kubectl get taskgroups
+# 应该看到: test-inittask-simple-test-group
+```
+
+✅ **4 个 InitTask 按顺序执行**
+- setup-dirs (非守护) → 完成
+- mock-spire-agent (守护) → 后台运行
+- wait-socket (非守护) → 完成
+- mock-envoy (守护) → 后台运行
+
+✅ **守护进程持续运行**
+```bash
+ps aux | grep "Mock SPIRE\|Mock Envoy"
+# 应该看到 2 个进程
+```
+
+✅ **主任务验证成功**
+```bash
+cat /tmp/k8s4r-test/run/spire/sockets/agent.sock
+# 文件存在
+```
+
+✅ **Task 状态正确更新**
+```bash
+kubectl get tasks -o jsonpath='{.items[0].status.state}'
+# 显示 "running" 或 "completed"
+```
+
+### 常见问题排查
+
+**问题 1: InitTask 未执行**
+```bash
+# 检查 Job YAML 格式
+kubectl get job test-inittask-simple -o yaml | grep -A 20 initTasks
+
+# 查看 Agent 日志，确认收到任务
+grep "executing initTasks" <agent-log>
+```
+
+**问题 2: 守护进程立即退出**
+```bash
+# 检查进程
+ps aux | grep mock
+
+# 手动测试守护进程命令
+/bin/bash -c 'while true; do echo "test"; sleep 10; done' &
+ps aux | grep bash
+kill %1
+```
+
+**问题 3: Socket 文件未创建**
+```bash
+# 手动创建测试
+mkdir -p /tmp/k8s4r-test/run/spire/sockets
+touch /tmp/k8s4r-test/run/spire/sockets/agent.sock
+ls -la /tmp/k8s4r-test/run/spire/sockets/
+```
+
+### 清理测试资源
+
+```bash
+# 删除 Job（级联删除 TaskGroup 和 Task）
+kubectl delete job test-inittask-simple
+
+# 删除 Robot
+kubectl delete robot robot-debug-001
+
+# 清理文件
+rm -rf /tmp/k8s4r-test/*
+
+# 停止守护进程
+pkill -f "Mock SPIRE Agent"
+pkill -f "Mock Envoy"
+
+# 停止组件 (Ctrl+C 各终端)
+# 或停止 MQTT
+./config/mosquitto/start-mosquitto.sh stop
+```
+
+### 进阶测试
+
+测试成功后，可以尝试：
+
+**测试单元测试：**
+```bash
+# 测试 InitTask 执行逻辑
+go test -v ./pkg/agent -run TestExecuteInitTasks
+
+# 测试 InitTask 只执行一次
+go test -v ./pkg/agent -run TestInitTasksOnlyRunOnce
+
+# 测试网络代理配置
+go test -v ./pkg/agent -run TestTaskExecutorWithNetworkProxy
+```
+
+**测试 Envoy 配置生成：**
+```bash
+# 测试配置生成
+go test -v ./pkg/agent -run TestGenerateEnvoyConfig
+
+# 测试 SPIFFE 集成
+go test -v ./pkg/agent -run TestEnvoyConfigSPIFFEIntegration
+```
+
+**使用真实 Envoy 和 SPIRE：**
+- 参考 `examples/job-with-spire-envoy.yaml`
+- 需要先安装和配置 SPIRE Server/Agent
+- 需要安装 Envoy 二进制文件
+
+---
+## 🚀 TaskGroup 集成测试指南（2025-11-26 最新架构）
+
+本节介绍如何测试最新的 TaskGroup 架构，验证从 Manager → Server → Agent 的完整流程。
+
+### 架构概览
+
+```
+Job CR (K8s)
+    ↓ (创建)
+TaskGroup CR (K8s)
+    ↓ (状态: scheduled)
+TaskGroupWatcher (Manager) ← 自动检测
+    ↓ (gRPC Stream: TaskGroupCommand)
+Server (gRPC → MQTT)
+    ↓ (MQTT: robot/{robotName}/taskgroup)
+Agent (TaskGroupManager)
+    ↓ (创建)
+TaskGroupExecutor (执行 InitTasks + Tasks)
+    ↓ (拥有独立的)
+TaskExecutor (实际执行器)
+    ↓ (MQTT: robot/{robotName}/taskgroup/status)
+Server → Manager
+    ↓ (更新)
+TaskGroup CR Status
+```
+
+### 测试步骤
+
+#### 步骤 1: 编译所有组件
+
+```bash
+cd /home/eai/hexiaonan/k8s4r
+
+# 编译 Manager
+go build -o bin/manager ./cmd/manager
+
+# 编译 Server
+go build -o bin/server ./cmd/server
+
+# 编译 Agent
+go build -o bin/agent ./cmd/agent
+
+# 验证编译结果
+ls -lh bin/
+```
+
+#### 步骤 2: 启动 MQTT Broker
+
+```bash
+# Terminal 1
+cd /home/eai/hexiaonan/k8s4r
+./config/mosquitto/start-mosquitto.sh simple
+
+# 验证
+docker ps | grep mosquitto
+```
+
+#### 步骤 3: 启动 Server
+
+```bash
+# Terminal 2
+cd /home/eai/hexiaonan/k8s4r
+./bin/server
+
+# 预期日志:
+# INFO    gRPC server listening at :50051
+# INFO    Subscribed to topic: robot/+/taskgroup/status
+# INFO    Connected to Manager gRPC stream
+```
+
+#### 步骤 4: 启动 Manager
+
+```bash
+# Terminal 3
+cd /home/eai/hexiaonan/k8s4r
+./bin/manager
+
+# 预期日志:
+# INFO    Starting manager
+# INFO    TaskGroup Watcher started
+# INFO    gRPC server started on :50051
+# INFO    Starting RobotReconciler
+# INFO    Starting TaskGroupReconciler
+```
+
+#### 步骤 5: 启动 Agent
+
+```bash
+# Terminal 4
+cd /home/eai/hexiaonan/k8s4r
+
+# 设置 Robot 名称（需要与后续创建的 Robot CR 一致）
+export ROBOT_NAME=robot-001
+
+# 启动 Agent
+./bin/agent
+
+# 预期日志:
+# INFO    Agent starting for robot: robot-001
+# INFO    Connected to MQTT broker: localhost:1883
+# INFO    Subscribed to topic: robot/robot-001/taskgroup
+# INFO    TaskGroupManager started
+```
+
+#### 步骤 6: 创建 Robot CR
+
+```bash
+# Terminal 5
+cd /home/eai/hexiaonan/k8s4r
+
+# 创建 Robot
+kubectl apply -f examples/robot.yaml
+
+# 验证
+kubectl get robot robot-001
+# 应该显示 STATUS: Online (Agent 上报心跳后)
+```
+
+#### 步骤 7: 创建测试 Job
+
+```bash
+# 使用 InitTask 测试 Job
+kubectl apply -f examples/test-inittask-simple.yaml
+
+# 观察 Job 状态
+kubectl get job test-inittask-simple -o yaml
+
+# 观察 TaskGroup 状态
+kubectl get taskgroup -l job=test-inittask-simple
+
+# 查看详细信息
+kubectl describe taskgroup <taskgroup-name>
+```
+
+#### 步骤 8: 观察日志流程
+
+**Manager (Terminal 3) 预期日志:**
+```
+INFO    JobReconciler: Creating TaskGroup for Job test-inittask-simple
+INFO    TaskGroupReconciler: Assigning robot robot-001 to TaskGroup
+INFO    TaskGroupReconciler: TaskGroup state changed to: scheduled
+INFO    TaskGroupWatcher: Pushing TaskGroup to robot-001
+INFO    TaskGroupStreamManager: Sent TaskGroupCommand to Server
+INFO    TaskGroupStreamManager: Received ACK from Server
+```
+
+**Server (Terminal 2) 预期日志:**
+```
+INFO    Received TaskGroupCommand: CREATE_TASKGROUP
+INFO    TaskGroup UID: <taskgroup-uid>
+INFO    Publishing to MQTT: robot/robot-001/taskgroup
+INFO    MQTT publish successful
+INFO    Sent PUBLISHED event to Manager
+INFO    Received TaskGroup status from robot-001
+INFO    Forwarding status to Manager (future: update Task CR)
+```
+
+**Agent (Terminal 4) 预期日志:**
+```
+INFO    Received TaskGroup from MQTT
+INFO    TaskGroup UID: <taskgroup-uid>
+INFO    Creating TaskGroupExecutor
+INFO    Starting InitTask: setup-dirs
+INFO    InitTask setup-dirs completed successfully
+INFO    Starting daemon InitTask: mock-spire-agent
+INFO    Daemon InitTask mock-spire-agent started, verifying health...
+INFO    Daemon InitTask mock-spire-agent is running (health check passed)
+INFO    Starting InitTask: wait-socket
+INFO    InitTask wait-socket completed successfully
+INFO    Starting daemon InitTask: mock-envoy
+INFO    All InitTasks completed successfully
+INFO    Starting main tasks...
+INFO    Task main-task started
+INFO    Task main-task output: Main task starting...
+INFO    Task main-task output: ✓ Socket file exists - InitTasks executed successfully!
+INFO    Task main-task completed successfully
+INFO    Publishing TaskGroup status: completed
+```
+
+#### 步骤 9: 验证结果
+
+```bash
+# 查看 TaskGroup 状态
+kubectl get taskgroup -l job=test-inittask-simple -o yaml
+
+# 应该看到:
+# status:
+#   state: completed
+#   assignedRobots:
+#     - robot-001
+
+# 查看 Job 状态
+kubectl get job test-inittask-simple -o yaml
+
+# 应该看到:
+# status:
+#   state: completed
+
+# 验证 InitTask 创建的文件
+ls -la /tmp/k8s4r-test/run/spire/sockets/agent.sock
+# 应该存在
+
+# 检查守护进程是否清理
+ps aux | grep "Mock SPIRE"
+ps aux | grep "Mock Envoy"
+# TaskGroup 完成后应该被自动清理
+```
+
+### 监控 MQTT 消息（可选）
+
+在单独的终端监控 MQTT 消息流：
+
+```bash
+# Terminal 6 - 监控 TaskGroup 下发
+mosquitto_sub -h localhost -p 1883 -t "robot/+/taskgroup" -v
+
+# Terminal 7 - 监控 TaskGroup 状态上报
+mosquitto_sub -h localhost -p 1883 -t "robot/+/taskgroup/status" -v
+```
+
+### 测试要点验证
+
+**✅ TaskGroup 隔离测试:**
+```bash
+# 创建两个 Job
+kubectl apply -f examples/test-inittask-simple.yaml
+# 修改 Job 名称后再次创建
+# 观察 Agent 日志，确认两个 TaskGroupExecutor 互不干扰
+```
+
+**✅ 守护进程健康检查:**
+```bash
+# 修改 InitTask 的 daemon 为 false
+# 观察是否跳过 2 秒健康检查
+```
+
+**✅ TaskGroup 自动推送:**
+```bash
+# 观察 Manager 的 TaskGroupWatcher 日志
+# 确认在 TaskGroup 状态变为 scheduled 时自动推送
+```
+
+**✅ gRPC Stream 通信:**
+```bash
+# 观察 Manager 和 Server 的 gRPC 日志
+# 确认 TaskGroupCommand 和 TaskGroupEvent 正常交互
+```
+
+### 常见问题排查
+
+**问题 1: Agent 未收到 TaskGroup**
+```bash
+# 检查 MQTT 连接
+mosquitto_sub -h localhost -p 1883 -t "robot/#" -v
+
+# 检查 Robot 名称是否匹配
+echo $ROBOT_NAME
+kubectl get robot
+
+# 检查 Server 日志是否显示 MQTT 发布成功
+```
+
+**问题 2: TaskGroup 状态未更新**
+```bash
+# 检查 Agent 是否上报状态
+# 观察 Terminal 4 (Agent) 日志
+
+# 检查 Server 是否订阅了状态 topic
+# 观察 Terminal 2 (Server) 日志中的 "Subscribed to topic"
+
+# 手动发布测试消息
+mosquitto_pub -h localhost -p 1883 \
+  -t "robot/robot-001/taskgroup/status" \
+  -m '{"uid":"test","state":"running"}'
+```
+
+**问题 3: InitTask 守护进程未启动**
+```bash
+# 检查 Agent 日志中的健康检查
+# 应该看到 "health check passed"
+
+# 手动测试守护进程
+ps aux | grep "Mock SPIRE"
+
+# 检查进程是否在 2 秒内启动
+```
+
+**问题 4: TaskGroupWatcher 未推送**
+```bash
+# 检查 Manager 日志
+# 应该看到 "TaskGroup Watcher started"
+
+# 检查 TaskGroup 状态
+kubectl get taskgroup -o yaml
+# state 应该为 "scheduled"
+
+# 手动触发（重启 Manager）
+```
+
+### 清理测试环境
+
+```bash
+# 删除 Job（会级联删除 TaskGroup）
+kubectl delete job test-inittask-simple
+
+# 删除 Robot
+kubectl delete robot robot-001
+
+# 清理测试文件
+rm -rf /tmp/k8s4r-test/*
+
+# 停止组件（各终端按 Ctrl+C）
+
+# 停止 MQTT Broker
+./config/mosquitto/start-mosquitto.sh stop
+
+# 清理守护进程（如果有残留）
+pkill -f "Mock SPIRE"
+pkill -f "Mock Envoy"
+```
+
+### 性能测试
+
+**并发 TaskGroup 测试:**
+```bash
+# 创建多个 Job
+for i in {1..10}; do
+  sed "s/test-inittask-simple/test-job-$i/g" examples/test-inittask-simple.yaml | kubectl apply -f -
+done
+
+# 观察 Agent 创建多个 TaskGroupExecutor
+# 每个 TaskGroup 应该有独立的执行环境
+
+# 查看所有 TaskGroup
+kubectl get taskgroup
+
+# 清理
+for i in {1..10}; do
+  kubectl delete job test-job-$i
+done
+```
+
+### 下一步
+
+TaskGroup 架构测试通过后，可以：
+- 实现 Task 状态详细查看功能
+- 添加 Task 日志查询 API
+- 实现类似 `kubectl logs` 的日志查看
+- 添加 TaskGroup 更新和回滚功能

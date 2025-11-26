@@ -1,0 +1,120 @@
+---
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-inittask-simple
+  namespace: default
+spec:
+  name: test-inittask-simple
+  # 空 robotSelector 匹配所有 Online 的 Robot
+  robotSelector: {}
+  type: service
+  datacenters:
+    - dc1
+  taskGroups:
+    - name: test-group
+      count: 1
+      
+      # 简单的 InitTasks 测试，无需真实的 SPIRE/Envoy
+      initTasks:
+        # 1. 创建目录
+        - name: setup-dirs
+          driver: exec
+          daemon: false
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Creating test directories..."
+                  mkdir -p /tmp/k8s4r-test/run/spire/sockets
+                  mkdir -p /tmp/k8s4r-test/config
+                  echo "Directories created successfully"
+        
+        # 2. 模拟 SPIRE Agent (守护进程)
+        - name: mock-spire-agent
+          driver: exec
+          daemon: true  # 守护进程模式
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Mock SPIRE Agent starting..."
+                  # 创建 socket 文件模拟
+                  touch /tmp/k8s4r-test/run/spire/sockets/agent.sock
+                  # 保持运行
+                  while true; do
+                    echo "Mock SPIRE Agent running... (PID: $$)"
+                    sleep 10
+                  done
+        
+        # 3. 等待 socket 文件创建
+        - name: wait-socket
+          driver: exec
+          daemon: false
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Waiting for socket file..."
+                  for i in {1..10}; do
+                    if [ -f /tmp/k8s4r-test/run/spire/sockets/agent.sock ]; then
+                      echo "Socket file found!"
+                      exit 0
+                    fi
+                    echo "Attempt $i: waiting..."
+                    sleep 1
+                  done
+                  echo "Timeout waiting for socket"
+                  exit 1
+        
+        # 4. 模拟 Envoy (守护进程)
+        - name: mock-envoy
+          driver: exec
+          daemon: true  # 守护进程模式
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Mock Envoy starting..."
+                  echo "Envoy config would be at: /tmp/k8s4r-test/config/envoy.yaml"
+                  # 模拟 Envoy 运行
+                  while true; do
+                    echo "Mock Envoy running on port 9901... (PID: $$)"
+                    sleep 15
+                  done
+      
+      tasks:
+        - name: main-task
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "Main task starting..."
+                  echo "InitTasks should have completed before this runs"
+                  echo "Checking for socket file..."
+                  if [ -f /tmp/k8s4r-test/run/spire/sockets/agent.sock ]; then
+                    echo "✓ Socket file exists - InitTasks executed successfully!"
+                  else
+                    echo "✗ Socket file not found - InitTasks may have failed"
+                  fi
+                  echo "Main task running for 30 seconds..."
+                  sleep 30
+                  echo "Main task completed!"
+          
+          env:
+            TEST_MODE: "true"
+          
+          resources:
+            cpu: "100m"
+            memory: "128Mi"

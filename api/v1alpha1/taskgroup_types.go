@@ -62,6 +62,12 @@ type TaskGroupSpec struct {
 	// Network 网络代理配置
 	// +optional
 	Network *NetworkProxy `json:"network,omitempty"`
+
+	// Resources TaskGroup 级别的资源限制
+	// 限制整个 TaskGroup（所有 Tasks 总和）的资源使用上限
+	// 例如：TaskGroup 总共最多使用 4 CPU 和 8GB 内存
+	// +optional
+	Resources *TaskResources `json:"resources,omitempty"`
 }
 
 // TaskGroupStatus defines the observed state of TaskGroup

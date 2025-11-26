@@ -290,7 +290,7 @@ spec:
                           anyOf:
                           - type: integer
                           - type: string
-                          description: CPU CPU 资源请求和限制
+                          description: CPU CPU 资源请求和限制（如 "100m", "0.5"）
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                         disk:
@@ -308,7 +308,7 @@ spec:
                           anyOf:
                           - type: integer
                           - type: string
-                          description: Memory 内存资源请求和限制
+                          description: Memory 内存资源请求和限制（如 "128Mi", "1Gi"）
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                         networks:
@@ -703,7 +703,7 @@ spec:
                           anyOf:
                           - type: integer
                           - type: string
-                          description: CPU CPU 资源请求和限制
+                          description: CPU CPU 资源请求和限制（如 "100m", "0.5"）
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                         disk:
@@ -721,7 +721,7 @@ spec:
                           anyOf:
                           - type: integer
                           - type: string
-                          description: Memory 内存资源请求和限制
+                          description: Memory 内存资源请求和限制（如 "128Mi", "1Gi"）
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                         networks:

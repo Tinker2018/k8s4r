@@ -86,24 +86,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 设置 TaskReconciler（负责调度、分发逻辑）
-	taskStreamManager := manager.NewTaskStreamManager(mgr.GetClient(), namespace)
+	// 设置 TaskGroupReconciler（负责调度和分发 TaskGroup）
+	taskGroupStreamManager := manager.NewTaskGroupStreamManager(mgr.GetClient(), namespace)
 
-	if err = (&controller.TaskReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		TaskStreamManager: taskStreamManager,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Task")
-		os.Exit(1)
-	}
-
-	// 设置 TaskGroupReconciler（负责根据 TaskGroup 创建 Task）
 	if err = (&controller.TaskGroupReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TaskGroup")
+		os.Exit(1)
+	}
+
+	// 设置 TaskReconciler（旧版，保留用于兼容性）
+	if err = (&controller.TaskReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		TaskStreamManager: nil, // 不再使用 Task Stream
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
 
@@ -118,16 +118,22 @@ func main() {
 
 	setupLog.Info("Controllers initialized")
 
+	// ========== 启动 TaskGroup Watcher ==========
+	// 监控 TaskGroup 状态变化，自动推送到 gRPC Stream
+	taskGroupWatcher := manager.NewTaskGroupWatcher(mgr.GetClient(), namespace, taskGroupStreamManager)
+	taskGroupWatcher.Start()
+	setupLog.Info("TaskGroup Watcher started")
+
 	// ========== 启动 gRPC Server ==========
 	// Manager 提供 gRPC 服务，Server 通过 gRPC 调用来通知状态变化
 	setupLog.Info("Starting gRPC server", "address", grpcAddr)
 
 	grpcServer := grpc.NewServer()
 
-	// 创建复合服务，同时实现 unary RPC 和 StreamTasks
+	// 创建复合服务，同时实现 unary RPC 和 StreamTaskGroups
 	compositeService := &manager.CompositeGRPCService{
-		GRPCServer:        manager.NewGRPCServer(mgr.GetClient(), namespace),
-		TaskStreamManager: taskStreamManager,
+		GRPCServer:             manager.NewGRPCServer(mgr.GetClient(), namespace),
+		TaskGroupStreamManager: taskGroupStreamManager,
 	}
 	pb.RegisterRobotManagerServer(grpcServer, compositeService)
 

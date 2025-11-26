@@ -1,12 +1,14 @@
 package driver
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/hashicorp/nomad/client/lib/cpustats"
 	cstructs "github.com/hashicorp/nomad/client/structs"
 	"github.com/hashicorp/nomad/drivers/shared/executor"
+	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/hashicorp/nomad/plugins/drivers"
 ) // NomadExecDriver 使用 Nomad 的 executor 实现的驱动
 // 这是真正使用 Nomad 代码的实现，提供完整的进程隔离、日志管理、资源监控
 type NomadExecDriver struct {
@@ -27,6 +31,7 @@ type NomadExecDriver struct {
 	baseDir       string
 	compute       cpustats.Compute
 	eventCallback EventCallback
+	cgroupsInited bool
 }
 
 // nomadTaskHandle Nomad executor 的任务句柄
@@ -56,12 +61,42 @@ func NewNomadExecDriver(baseDir string, logger hclog.Logger) *NomadExecDriver {
 	}
 
 	return &NomadExecDriver{
-		tasks:   make(map[string]*nomadTaskHandle),
-		logger:  logger.Named("nomad_exec_driver"),
-		baseDir: baseDir,
-		compute: compute,
+		tasks:         make(map[string]*nomadTaskHandle),
+		logger:        logger.Named("nomad_exec_driver"),
+		baseDir:       baseDir,
+		compute:       compute,
+		cgroupsInited: true,
 	}
 }
+
+// // initCgroups 初始化 Nomad cgroups 父目录（只需要初始化一次）
+// // 这模拟了 Nomad client 的 cgroup 初始化过程
+// // 注意：调用者必须已持有 d.mu 锁
+// func (d *NomadExecDriver) initCgroups() error {
+// 	d.logger.Info(">>> ENTERING initCgroups() <<<")
+
+// 	if d.cgroupsInited {
+// 		d.logger.Info("cgroups already initialized, skipping")
+// 		return nil
+// 	}
+
+// 	// 检测可用的 CPU 核心
+// 	cores := fmt.Sprintf("0-%d", runtime.NumCPU()-1)
+
+// 	d.logger.Info("initializing cgroups for k8s4r", "cores", cores, "mode", cgroupslib.GetMode())
+
+// 	// 调用 Nomad 的 cgroup 初始化
+// 	// 注意：这需要 root 权限！
+// 	d.logger.Info("calling cgroupslib.Init() - this requires root privileges")
+// 	if err := cgroupslib.Init(d.logger, cores); err != nil {
+// 		d.logger.Error("failed to initialize cgroups", "error", err)
+// 		return fmt.Errorf("failed to initialize cgroups (requires root): %w", err)
+// 	}
+
+// 	d.cgroupsInited = true
+// 	d.logger.Info("cgroups initialized successfully")
+// 	return nil
+// }
 
 // Name 返回驱动名称
 func (d *NomadExecDriver) Name() string {
@@ -116,52 +151,17 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 
 	cfg := task.Spec.Config.ExecConfig
 
-	// 创建 TaskGroup 级别的目录结构（同一 TaskGroup 的所有 Task 共享）
+	// 1. 创建 Task 级别的核心工作目录（必须先创建，Hook 可能需要用到）
 	taskGroupDir := filepath.Join(d.baseDir, taskGroupName)
-	sharedDir := filepath.Join(taskGroupDir, "shared") // 共享目录
-	artifactsDir := filepath.Join(sharedDir, "local")  // artifacts 下载到 shared/local
-
-	// 创建 Task 级别的工作目录
 	taskDir := filepath.Join(taskGroupDir, taskID)
 	logDir := filepath.Join(taskDir, "logs")
-	localDir := filepath.Join(taskDir, "local") // Task 的 local 目录（softlink 到 ../shared/local）
 
-	// 确保 TaskGroup 共享目录和 artifacts 目录存在
-	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create artifacts dir %s: %w", artifactsDir, err)
+	// 确保核心目录存在
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log dir %s: %w", logDir, err)
 	}
 
-	// 确保 Task 目录存在
-	for _, dir := range []string{taskDir, logDir} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create dir %s: %w", dir, err)
-		}
-	}
-
-	// 创建 softlink: taskDir/local -> ../shared/local
-	// 这样同一 TaskGroup 的所有 Task 都能通过 local/ 访问共享的 artifacts
-	relSharedLocal := filepath.Join("..", "shared", "local")
-	if err := os.Symlink(relSharedLocal, localDir); err != nil && !os.IsExist(err) {
-		return nil, fmt.Errorf("failed to create symlink %s -> %s: %w", localDir, relSharedLocal, err)
-	}
-
-	// 下载 artifacts（使用 go-getter，HTTP 客户端已配置超时）
-	if len(task.Spec.Artifacts) > 0 {
-		d.logger.Info("downloading artifacts", "count", len(task.Spec.Artifacts), "destination", artifactsDir)
-		d.emitEvent(taskID, "Downloading", fmt.Sprintf("Downloading %d artifacts", len(task.Spec.Artifacts)))
-
-		// 直接调用下载方法（超时在 HTTP 客户端中配置）
-		if err := d.downloadArtifacts(ctx, task.Spec.Artifacts, artifactsDir); err != nil {
-			d.logger.Error("artifact download failed", "error", err)
-			d.emitEvent(taskID, "DownloadFailed", fmt.Sprintf("Failed to download artifacts: %v", err))
-			return nil, fmt.Errorf("failed to download artifacts: %w", err)
-		}
-
-		d.logger.Info("artifacts downloaded successfully")
-		d.emitEvent(taskID, "Downloaded", "All artifacts downloaded successfully")
-	}
-
-	// 预创建日志文件（Nomad executor 在 macOS 上可能需要）
+	// 预创建日志文件（Nomad executor 在某些平台上可能需要）
 	stdoutPath := filepath.Join(logDir, "stdout.log")
 	stderrPath := filepath.Join(logDir, "stderr.log")
 	for _, logPath := range []string{stdoutPath, stderrPath} {
@@ -172,8 +172,33 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 		}
 	}
 
-	// 创建 Nomad executor（真正的 Nomad 代码！）
+	// 创建 Nomad executor（使用完整隔离模式）
+	// NewExecutorWithIsolation 提供：
+	// 1. cgroup 资源隔离（CPU、内存限制）
+	// 2. chroot 文件系统隔离（进程只能看到 TaskDir）
+	// 3. 需要通过 Mounts 挂载系统二进制文件才能运行系统命令
 	execImpl := executor.NewExecutorWithIsolation(d.logger, d.compute)
+
+	// cgroup tree初始化操作（需要 root 权限）
+	// if err := d.initCgroups(); err != nil {
+	// 	return nil, fmt.Errorf("failed to initialize cgroups: %w", err)
+	// }
+
+	// 生成两层 cgroup 路径：
+	// 1. TaskGroup 层：nomad.slice/share.slice/<taskGroupName>
+	//    - 限制整个 TaskGroup 的总资源（如总共 4 CPU, 8GB 内存）
+	// 2. Task 层：nomad.slice/share.slice/<taskGroupName>/<taskID>
+	//    - 限制单个 Task 的资源（如单个 Task 最多 2 CPU, 4GB 内存）
+	// 好处：
+	//   - TaskGroup 层确保所有 Task 总和不超过上限
+	//   - Task 层确保单个失控的 Task 不会占用所有资源
+	cgroupScope := filepath.Join("/sys/fs/cgroup/nomad.slice/share.slice", taskGroupName, taskID)
+
+	d.logger.Info("cgroup configuration (two-level hierarchy)",
+		"cgroupScope", cgroupScope,
+		"taskGroupName", taskGroupName,
+		"taskID", taskID,
+		"note", "TaskGroup-level and Task-level resource limits")
 
 	// 构建执行命令（Nomad 的格式）
 	execCmd := &executor.ExecCommand{
@@ -188,8 +213,70 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 		// 工作目录
 		TaskDir: taskDir,
 
+		// 启用资源限制（cgroup）
+		ResourceLimits: true,
+
+		// 配置 Mounts：挂载系统目录到 chroot 环境
+		// 参考 Nomad 的 executor_linux_test.go 中的 chrootEnv 配置
+		// 这些挂载使得进程在 chroot 后仍能访问系统命令和库
+		Mounts: []*drivers.MountConfig{
+			// 动态链接器配置（必需，否则无法运行任何动态链接的程序）
+			{TaskPath: "/etc/ld.so.cache", HostPath: "/etc/ld.so.cache", Readonly: true},
+			{TaskPath: "/etc/ld.so.conf", HostPath: "/etc/ld.so.conf", Readonly: true},
+			{TaskPath: "/etc/ld.so.conf.d", HostPath: "/etc/ld.so.conf.d", Readonly: true},
+
+			// 用户信息（某些命令可能需要）
+			{TaskPath: "/etc/passwd", HostPath: "/etc/passwd", Readonly: true},
+			{TaskPath: "/etc/group", HostPath: "/etc/group", Readonly: true},
+
+			// 系统库（必需）
+			{TaskPath: "/lib", HostPath: "/lib", Readonly: true},
+			{TaskPath: "/lib64", HostPath: "/lib64", Readonly: true},
+			{TaskPath: "/usr/lib", HostPath: "/usr/lib", Readonly: true},
+
+			// 系统二进制目录（挂载整个目录，而不是单个文件）
+			{TaskPath: "/bin", HostPath: "/bin", Readonly: true},
+			{TaskPath: "/usr/bin", HostPath: "/usr/bin", Readonly: true},
+			{TaskPath: "/sbin", HostPath: "/sbin", Readonly: true},
+			{TaskPath: "/usr/sbin", HostPath: "/usr/sbin", Readonly: true},
+
+			// /tmp 目录（可写，用于临时文件）
+			{TaskPath: "/tmp", HostPath: "/tmp", Readonly: false},
+
+			// /dev 设备（某些程序可能需要访问 /dev/null, /dev/zero 等）
+			// 注意：Nomad 的 libcontainer 会自动创建必要的设备节点
+			// 这里不需要手动挂载 /dev
+		},
+
+		// 设置 cgroup 覆盖路径
+		OverrideCgroupV2: cgroupScope, // cgroup v2 统一路径
+		OverrideCgroupV1: map[string]string{ // cgroup v1 每个控制器的路径
+			"cpu":     cgroupScope,
+			"cpuset":  cgroupScope,
+			"memory":  cgroupScope,
+			"pids":    cgroupScope,
+			"freezer": cgroupScope,
+		},
+
 		// 用户（可选，需要 root 权限）
 		// User: "nobody",
+	}
+
+	// 设置任务的资源配置
+	execCmd.Resources = &drivers.Resources{
+		NomadResources: &structs.AllocatedTaskResources{
+			Cpu: structs.AllocatedCpuResources{
+				CpuShares: 100, // 最小 CPU shares
+			},
+			Memory: structs.AllocatedMemoryResources{
+				MemoryMB: 256, // 最小内存限制 256MB
+			},
+		},
+		LinuxResources: &drivers.LinuxResources{
+			CPUShares:        100,
+			MemoryLimitBytes: 256 * 1024 * 1024,
+			CpusetCgroupPath: cgroupScope, // 关键：设置 cgroup 路径，用于 StatsCgroup()
+		},
 	}
 
 	// 创建插件上下文（用于 Nomad executor 的生命周期管理）
@@ -231,6 +318,10 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 
 	// 保存句柄
 	d.tasks[taskID] = handle
+
+	// 启动日志流式输出（实时打印 stdout/stderr）
+	go d.streamLogs(handle, stdoutPath, "stdout")
+	go d.streamLogs(handle, stderrPath, "stderr")
 
 	// 异步等待进程结束（使用 Nomad 的 Wait 机制）
 	go d.waitTask(handle)
@@ -364,15 +455,15 @@ func (d *NomadExecDriver) GetLogs(ctx context.Context, handle *TaskHandle, stdou
 // Destroy 清理任务资源
 func (d *NomadExecDriver) Destroy(ctx context.Context, handle *TaskHandle) error {
 	d.mu.Lock()
-	h, exists := d.tasks[handle.TaskID]
-	if exists {
-		delete(d.tasks, handle.TaskID)
-	}
-	d.mu.Unlock()
+	defer d.mu.Unlock()
 
+	h, exists := d.tasks[handle.TaskID]
 	if !exists {
 		return nil
 	}
+
+	// 从 tasks map 中删除
+	delete(d.tasks, handle.TaskID)
 
 	// 取消插件上下文
 	h.pluginCtxCancel()
@@ -406,7 +497,7 @@ func (d *NomadExecDriver) waitTask(h *nomadTaskHandle) {
 
 	// 根据退出码判断成功还是失败
 	if exitState.ExitCode == 0 {
-		d.emitEvent(h.TaskID, "Completed", fmt.Sprintf("Task completed successfully (exit code 0)"))
+		d.emitEvent(h.TaskID, "Completed", "Task completed successfully (exit code 0)")
 		d.logger.Info("task completed successfully",
 			"taskID", h.TaskID,
 			"pid", h.PID,
@@ -418,6 +509,77 @@ func (d *NomadExecDriver) waitTask(h *nomadTaskHandle) {
 			"pid", h.PID,
 			"exitCode", exitState.ExitCode,
 			"signal", exitState.Signal)
+	}
+}
+
+// streamLogs 实时流式输出任务日志（tail -f 方式）
+func (d *NomadExecDriver) streamLogs(h *nomadTaskHandle, logPath string, streamName string) {
+	// 等待日志文件创建
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(logPath); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	file, err := os.Open(logPath)
+	if err != nil {
+		d.logger.Error("failed to open log file", "path", logPath, "error", err)
+		return
+	}
+	defer file.Close()
+
+	// 移到文件末尾开始读取（只读取新内容）
+	file.Seek(0, io.SeekStart)
+
+	reader := bufio.NewReader(file)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.doneCh:
+			// 任务结束，读取剩余日志后退出
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					if err != io.EOF {
+						d.logger.Error("error reading log", "stream", streamName, "error", err)
+					}
+					return
+				}
+				if line != "" {
+					line = strings.TrimSuffix(line, "\n")
+					if streamName == "stdout" {
+						d.logger.Info(fmt.Sprintf("[%s] %s", h.TaskID[:8], line))
+					} else {
+						d.logger.Error(fmt.Sprintf("[%s] %s", h.TaskID[:8], line))
+					}
+				}
+			}
+
+		case <-ticker.C:
+			// 定期检查新内容
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					if err == io.EOF {
+						break // 没有更多数据，继续等待
+					}
+					d.logger.Error("error reading log", "stream", streamName, "error", err)
+					return
+				}
+
+				if line != "" {
+					line = strings.TrimSuffix(line, "\n")
+					if streamName == "stdout" {
+						d.logger.Info(fmt.Sprintf("[%s] %s", h.TaskID[:8], line))
+					} else {
+						d.logger.Error(fmt.Sprintf("[%s] %s", h.TaskID[:8], line))
+					}
+				}
+			}
+		}
 	}
 }
 

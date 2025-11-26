@@ -9,18 +9,11 @@ import (
 	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
 )
 
-// generateEnvoyConfig 根据 NetworkProxy 配置动态生成 Envoy 配置文件
-func generateEnvoyConfig(taskGroupName string, network *robotv1alpha1.NetworkProxy, configDir string) (string, error) {
+// GenerateEnvoyConfig 生成 Envoy 配置（导出函数用于测试）
+func GenerateEnvoyConfig(taskName string, network *robotv1alpha1.NetworkProxy) ([]byte, error) {
 	if network == nil || !network.Enabled {
-		return "", fmt.Errorf("network proxy not enabled")
+		return nil, fmt.Errorf("network proxy not enabled")
 	}
-
-	// 确保配置目录存在
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create config dir: %w", err)
-	}
-
-	configPath := filepath.Join(configDir, fmt.Sprintf("envoy-%s.yaml", taskGroupName))
 
 	// 获取 SPIFFE 配置
 	spiffeConfig := network.SPIFFE
@@ -74,8 +67,25 @@ static_resources:
 %s
 `, strings.Join(listeners, "\n"), strings.Join(clusters, "\n"))
 
+	return []byte(config), nil
+}
+
+// generateEnvoyConfig 根据 NetworkProxy 配置动态生成 Envoy 配置文件
+func generateEnvoyConfig(taskGroupName string, network *robotv1alpha1.NetworkProxy, configDir string) (string, error) {
+	config, err := GenerateEnvoyConfig(taskGroupName, network)
+	if err != nil {
+		return "", err
+	}
+
+	// 确保配置目录存在
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create config dir: %w", err)
+	}
+
+	configPath := filepath.Join(configDir, fmt.Sprintf("envoy-%s.yaml", taskGroupName))
+
 	// 写入文件
-	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
+	if err := os.WriteFile(configPath, config, 0644); err != nil {
 		return "", fmt.Errorf("failed to write config file: %w", err)
 	}
 

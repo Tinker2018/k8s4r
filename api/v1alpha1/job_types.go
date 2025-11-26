@@ -32,6 +32,10 @@ type JobSpec struct {
 	// +optional
 	Type JobType `json:"type,omitempty"`
 
+	// Datacenters 数据中心列表（用于多数据中心部署）
+	// +optional
+	Datacenters []string `json:"datacenters,omitempty"`
+
 	// Priority 优先级 (0-100)
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -73,6 +77,11 @@ type TaskGroupTemplate struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	Count int32 `json:"count"`
+
+	// InitTasks 初始化任务列表（类似 K8s initContainers）
+	// 这些任务在主任务执行前按顺序执行
+	// +optional
+	InitTasks []TaskDefinition `json:"initTasks,omitempty"`
 
 	// Tasks 任务列表
 	// +kubebuilder:validation:Required

@@ -36,7 +36,7 @@ spec:
                   echo ""
                   echo "Test completed successfully!"
           resources:
-            cpu: 100
-            memory: 128
+            cpu: "100m"
+            memory: "128Mi"
           env:
             TEST_MODE: "artifact"

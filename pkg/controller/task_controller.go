@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndghxndg/k8s4r/pkg/manager"
 )
 
 // TaskReconciler reconciles Task objects
@@ -29,10 +28,11 @@ import (
 // 1. 推送Task到gRPC Stream（Server → MQTT → Agent）
 // 2. 监控Task状态变化
 // 注意：Task由TaskGroup Controller创建，不由Task Controller创建
+// ⚠️ 已废弃：现在直接使用 TaskGroup，不再创建单独的 Task CR
 type TaskReconciler struct {
 	client.Client
 	Scheme            *runtime.Scheme
-	TaskStreamManager *manager.TaskStreamManager
+	TaskStreamManager interface{} // 已废弃，保留字段用于兼容性
 }
 
 //+kubebuilder:rbac:groups=robot.k8s4r.io,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -107,17 +107,9 @@ func (r *TaskReconciler) pushTaskToStream(ctx context.Context, task *robotv1alph
 		return ctrl.Result{}, nil
 	}
 
-	logger.Info(" [GRPC STREAM] Pushing task to stream",
-		"task", task.Name,
-		"robot", task.Spec.TargetRobot)
-
-	if r.TaskStreamManager != nil {
-		if err := r.TaskStreamManager.PushTaskToStream(ctx, task); err != nil {
-			logger.Error(err, " Failed to push task to stream")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		logger.Info(" [GRPC STREAM] Task pushed successfully", "task", task.Name)
-	}
+	// ⚠️ TaskStreamManager 已废弃，现在使用 TaskGroup
+	// Task CR 不再通过 gRPC Stream 推送
+	logger.Info("⚠️ Task reconciliation is deprecated, use TaskGroup instead", "task", task.Name)
 
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }

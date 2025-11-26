@@ -226,15 +226,15 @@ func (a *Agent) Run() {
 		break
 	}
 
-	// 创建并启动 TaskExecutor
+	// 创建并启动 TaskGroupManager（管理所有 TaskGroup）
 	ctx := context.Background()
-	taskExecutor := agent.NewTaskExecutor(a.RobotID, a.mqttClient, a.WorkDir, nil)
-	if err := taskExecutor.Start(ctx); err != nil {
-		log.Fatalf("Failed to start task executor: %v", err)
+	taskGroupManager := agent.NewTaskGroupManager(a.RobotID, a.mqttClient, a.WorkDir, nil)
+	if err := taskGroupManager.Start(ctx); err != nil {
+		log.Fatalf("Failed to start taskgroup manager: %v", err)
 	}
-	defer taskExecutor.Stop(ctx)
+	defer taskGroupManager.Stop(ctx)
 
-	log.Printf("Task executor started successfully")
+	log.Printf("TaskGroup manager started successfully")
 
 	// 启动心跳循环
 	ticker := time.NewTicker(a.HeartbeatInterval)

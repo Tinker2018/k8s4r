@@ -223,11 +223,11 @@ type JavaDriverConfig struct {
 
 // TaskResources 任务资源定义
 type TaskResources struct {
-	// CPU CPU 资源请求和限制
+	// CPU CPU 资源请求和限制（如 "100m", "0.5"）
 	// +optional
 	CPU *resource.Quantity `json:"cpu,omitempty"`
 
-	// Memory 内存资源请求和限制
+	// Memory 内存资源请求和限制（如 "128Mi", "1Gi"）
 	// +optional
 	Memory *resource.Quantity `json:"memory,omitempty"`
 

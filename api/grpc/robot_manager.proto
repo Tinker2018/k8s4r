@@ -18,10 +18,10 @@ service RobotManager {
   // 单向 RPC：Server 通知 Manager 任务状态变化
   rpc ReportTaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
   
-  // ==========  双向流：Manager 推送任务给 Server ==========
-  // Manager 监听 K8s Task 变化，通过此流推送给 Server
-  // Server 将任务转发到 MQTT
-  rpc StreamTasks(stream TaskEvent) returns (stream TaskCommand);
+  // ==========  双向流：Manager 推送 TaskGroup 给 Server ==========
+  // Manager 监听 K8s TaskGroup 变化，通过此流推送给 Server
+  // Server 将 TaskGroup 转发到 MQTT
+  rpc StreamTaskGroups(stream TaskGroupEvent) returns (stream TaskGroupCommand);
 }
 
 // ===== Robot 注册相关 =====
@@ -69,23 +69,24 @@ message TaskStatusResponse {
   string message = 2;
 }
 
-// =====  双向流：任务推送 =====
+// =====  双向流：TaskGroup 推送 =====
 
-// TaskCommand Manager → Server 的指令
-message TaskCommand {
+// TaskGroupCommand Manager → Server 的指令
+message TaskGroupCommand {
   enum CommandType {
-    CREATE_TASK = 0;   // 创建任务
-    DELETE_TASK = 1;   // 删除任务
-    KEEPALIVE = 2;     // 保持连接
+    CREATE_TASKGROUP = 0;   // 创建任务组
+    DELETE_TASKGROUP = 1;   // 删除任务组
+    KEEPALIVE = 2;          // 保持连接
   }
   
   CommandType type = 1;
-  Task task = 2;       // type=CREATE_TASK 时有效
-  string task_uid = 3; // type=DELETE_TASK 时有效
+  string taskgroup_json = 2;  // 完整的 TaskGroup JSON（包含所有字段）
+  string taskgroup_uid = 3;   // TaskGroup UID
+  string robot_name = 4;      // 目标机器人名称
 }
 
-// TaskEvent Server → Manager 的事件（确认收到）
-message TaskEvent {
+// TaskGroupEvent Server → Manager 的事件（确认收到）
+message TaskGroupEvent {
   enum EventType {
     ACK = 0;           // 确认收到指令
     PUBLISHED = 1;     // 已发布到 MQTT
@@ -94,29 +95,9 @@ message TaskEvent {
   }
   
   EventType type = 1;
-  string task_uid = 2;
-  string message = 3;
-}
-
-// Task 完整的任务信息
-message Task {
-  // Metadata
-  string uid = 1;
-  string name = 2;
-  string namespace = 3;
-  
-  // Spec
-  string job_name = 4;
-  string target_robot = 5;
-  string driver = 6;
-  string config = 7;        // JSON 字符串
-  int64 timeout = 8;        // 秒
-  int64 kill_timeout = 9;   // 秒
-  map<string, string> env = 10;
-  
-  // Status
-  string state = 11;        // pending, dispatching, running, completed, failed
-  string message = 12;
+  string taskgroup_uid = 2;   // 任务组 UID
+  string robot_name = 3;      // 机器人名称
+  string message = 4;
 }
 
 // ===== 设备信息 =====

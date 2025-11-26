@@ -41,11 +41,11 @@ func NewGRPCServer(client client.Client, namespace string) *GRPCServer {
 	}
 }
 
-// CompositeGRPCService 组合 GRPCServer 和 TaskStreamManager
+// CompositeGRPCService 组合 GRPCServer 和 TaskGroupStreamManager
 // 实现完整的 RobotManagerServer 接口
 type CompositeGRPCService struct {
 	*GRPCServer
-	*TaskStreamManager
+	*TaskGroupStreamManager
 }
 
 // ReportRobotRegistration 处理 Robot 注册

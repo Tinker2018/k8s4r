@@ -14,13 +14,13 @@ fi
 # 检查 protoc-gen-go 是否安装
 if ! command -v protoc-gen-go &> /dev/null; then
     echo "Installing protoc-gen-go..."
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+    GOPROXY=https://goproxy.cn,direct go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 fi
 
 # 检查 protoc-gen-go-grpc 是否安装
 if ! command -v protoc-gen-go-grpc &> /dev/null; then
     echo "Installing protoc-gen-go-grpc..."
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+    GOPROXY=https://goproxy.cn,direct go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 fi
 
 echo "Generating gRPC code from proto files..."

@@ -1,0 +1,95 @@
+---
+apiVersion: robot.k8s4r.io/v1alpha1
+kind: Job
+metadata:
+  name: test-taskgroup-simple
+  namespace: default
+spec:
+  name: test-taskgroup-simple
+  # 匹配所有 Online 的 Robot
+  robotSelector: {}
+  type: service
+  datacenters:
+    - dc1
+  taskGroups:
+    - name: simple-group
+      count: 1
+      
+      # 简单的 InitTask：创建测试目录
+      initTasks:
+        - name: setup-workspace
+          driver: exec
+          daemon: false
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "=== Setting up workspace ==="
+                  mkdir -p /tmp/k8s4r-taskgroup-test/data
+                  echo "Workspace created at /tmp/k8s4r-taskgroup-test"
+                  echo "test-data-$(date +%s)" > /tmp/k8s4r-taskgroup-test/data/test.txt
+                  echo "=== Setup completed ==="
+        
+        # 守护进程 InitTask：模拟后台服务
+        - name: background-service
+          driver: exec
+          daemon: true
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "=== Background service starting ==="
+                  echo "Service PID: $$"
+                  # 模拟一个简单的后台服务
+                  while true; do
+                    echo "[$(date)] Background service is running..."
+                    sleep 5
+                  done
+      
+      # 主任务：验证 InitTask 完成
+      tasks:
+        - name: verify-and-run
+          driver: exec
+          config:
+            execConfig:
+              command: /bin/bash
+              args:
+                - -c
+                - |
+                  echo "=== Main task starting ==="
+                  
+                  # 验证 InitTask 创建的目录和文件
+                  if [ -d /tmp/k8s4r-taskgroup-test/data ]; then
+                    echo "✓ Workspace directory exists"
+                  else
+                    echo "✗ Workspace directory not found"
+                    exit 1
+                  fi
+                  
+                  if [ -f /tmp/k8s4r-taskgroup-test/data/test.txt ]; then
+                    echo "✓ Test file exists"
+                    echo "  Content: $(cat /tmp/k8s4r-taskgroup-test/data/test.txt)"
+                  else
+                    echo "✗ Test file not found"
+                    exit 1
+                  fi
+                  
+                  # 模拟一些工作
+                  echo "=== Performing work ==="
+                  for i in {1..5}; do
+                    echo "  Step $i: Processing..."
+                    sleep 1
+                  done
+                  
+                  echo "=== Main task completed successfully ==="
+          
+          env:
+            TASK_ENV: "production"
+          
+          resources:
+            cpu: "100m"
+            memory: "128Mi"

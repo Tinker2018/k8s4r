@@ -204,8 +204,13 @@ func (r *TaskGroupReconciler) scheduleTaskGroup(ctx context.Context, taskGroup *
 		"replicas", replicaCount,
 		"totalTasks", taskGroup.Status.TotalTasks)
 
-	// 立即创建Task实例
-	return r.createTasks(ctx, taskGroup)
+	// 不再创建 Task CR，直接返回
+	// TaskGroup 将通过 MQTT 直接发送到 Agent
+	logger.Info("📡 TaskGroup ready for dispatch via MQTT",
+		"name", taskGroup.Name,
+		"assignedRobots", len(taskGroup.Status.AssignedRobots))
+
+	return ctrl.Result{}, nil
 }
 
 // createTasks 根据AssignedRobots创建Task实例

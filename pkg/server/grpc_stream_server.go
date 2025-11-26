@@ -30,19 +30,19 @@ import (
 
 // GRPCStreamServer 基于 gRPC Stream 的 Server
 // 职责：
-// 1. MQTT → gRPC：接收 Agent 的注册/心跳/任务状态，通过 gRPC 上报给 Manager
-// 2. gRPC → MQTT：接收 Manager 推送的任务，转发到 MQTT
+// 1. MQTT → gRPC：接收 Agent 的注册/心跳/TaskGroup状态，通过 gRPC 上报给 Manager
+// 2. gRPC → MQTT：接收 Manager 推送的 TaskGroup，转发到 MQTT
 type GRPCStreamServer struct {
-	mqttBroker string
-	grpcAddr   string
-	mqttClient mqtt.Client
-	grpcConn   *grpc.ClientConn
-	grpcClient pb.RobotManagerClient
-	taskStream pb.RobotManager_StreamTasksClient
+	mqttBroker      string
+	grpcAddr        string
+	mqttClient      mqtt.Client
+	grpcConn        *grpc.ClientConn
+	grpcClient      pb.RobotManagerClient
+	taskGroupStream pb.RobotManager_StreamTaskGroupsClient
 
-	// 任务分发跟踪
-	dispatchedTasks map[string]bool // taskUID -> dispatched
-	tasksMu         sync.RWMutex
+	// TaskGroup 分发跟踪
+	dispatchedTaskGroups map[string]bool // taskGroupUID-robotName -> dispatched
+	taskGroupsMu         sync.RWMutex
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,11 +52,11 @@ type GRPCStreamServer struct {
 func NewGRPCStreamServer(mqttBroker, grpcAddr string) *GRPCStreamServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &GRPCStreamServer{
-		mqttBroker:      mqttBroker,
-		grpcAddr:        grpcAddr,
-		dispatchedTasks: make(map[string]bool),
-		ctx:             ctx,
-		cancel:          cancel,
+		mqttBroker:           mqttBroker,
+		grpcAddr:             grpcAddr,
+		dispatchedTaskGroups: make(map[string]bool),
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 }
 
@@ -70,9 +70,9 @@ func (s *GRPCStreamServer) Start() error {
 		return fmt.Errorf("failed to connect gRPC: %w", err)
 	}
 
-	// 2. 建立 StreamTasks 连接
-	if err := s.initTaskStream(); err != nil {
-		return fmt.Errorf("failed to init task stream: %w", err)
+	// 2. 建立 StreamTaskGroups 连接
+	if err := s.initTaskGroupStream(); err != nil {
+		return fmt.Errorf("failed to init taskgroup stream: %w", err)
 	}
 
 	// 3. 连接 MQTT
@@ -80,8 +80,8 @@ func (s *GRPCStreamServer) Start() error {
 		return fmt.Errorf("failed to connect MQTT: %w", err)
 	}
 
-	// 4. 启动 Stream 接收循环（接收 Manager 推送的任务）
-	go s.receiveTasksFromStream()
+	// 4. 启动 Stream 接收循环（接收 Manager 推送的 TaskGroup）
+	go s.receiveTaskGroupsFromStream()
 
 	logger.Info(" GRPCStreamServer started successfully")
 	return nil
@@ -123,34 +123,34 @@ func (s *GRPCStreamServer) connectGRPC() error {
 	return nil
 }
 
-// initTaskStream 初始化 StreamTasks 双向流
-func (s *GRPCStreamServer) initTaskStream() error {
+// initTaskGroupStream 初始化 StreamTaskGroups 双向流
+func (s *GRPCStreamServer) initTaskGroupStream() error {
 	logger := log.FromContext(s.ctx)
-	logger.Info("Initializing StreamTasks bidirectional stream")
+	logger.Info("Initializing StreamTaskGroups bidirectional stream")
 
-	stream, err := s.grpcClient.StreamTasks(s.ctx)
+	stream, err := s.grpcClient.StreamTaskGroups(s.ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create stream: %w", err)
 	}
 
-	s.taskStream = stream
-	logger.Info(" StreamTasks initialized")
+	s.taskGroupStream = stream
+	logger.Info(" StreamTaskGroups initialized")
 	return nil
 }
 
-// receiveTasksFromStream 持续接收 Manager 推送的任务
+// receiveTaskGroupsFromStream 持续接收 Manager 推送的 TaskGroup
 // ========== gRPC Stream 接收逻辑 ==========
-// Manager 通过 stream.Send(TaskCommand) 推送任务
-// Server 通过 stream.Recv() 接收任务
-func (s *GRPCStreamServer) receiveTasksFromStream() {
+// Manager 通过 stream.Send(TaskGroupCommand) 推送 TaskGroup
+// Server 通过 stream.Recv() 接收 TaskGroup
+func (s *GRPCStreamServer) receiveTaskGroupsFromStream() {
 	logger := log.FromContext(s.ctx)
-	logger.Info(" Started receiving tasks from Manager stream")
+	logger.Info(" Started receiving TaskGroups from Manager stream")
 
 	const (
-		topicRegister                = "k8s4r/register"
-		topicHeartbeat               = "k8s4r/heartbeat"
-		topicRobotTaskDispatch       = "k8s4r/robots/%s/tasks/dispatch"
-		topicRobotTaskStatusWildcard = "k8s4r/robots/+/tasks/+/status"
+		topicRegister                     = "k8s4r/register"
+		topicHeartbeat                    = "k8s4r/heartbeat"
+		topicRobotTaskGroupDispatch       = "robot/%s/taskgroup"
+		topicRobotTaskGroupStatusWildcard = "robot/+/taskgroup/status"
 	)
 
 	for {
@@ -161,89 +161,90 @@ func (s *GRPCStreamServer) receiveTasksFromStream() {
 		default:
 		}
 
-		// 阻塞接收 Manager 发来的 TaskCommand
-		taskCmd, err := s.taskStream.Recv()
+		// 阻塞接收 Manager 发来的 TaskGroupCommand
+		taskGroupCmd, err := s.taskGroupStream.Recv()
 		if err != nil {
-			logger.Error(err, "Failed to receive task from stream, reconnecting...")
+			logger.Error(err, "Failed to receive taskgroup from stream, reconnecting...")
 			time.Sleep(5 * time.Second)
 			// TODO: 实现重连逻辑
 			continue
 		}
 
 		// 处理不同类型的命令
-		switch taskCmd.Type {
-		case pb.TaskCommand_CREATE_TASK:
-			if taskCmd.Task != nil {
-				logger.Info(" [GRPC STREAM] Received CREATE_TASK from Manager",
-					"taskUID", taskCmd.Task.Uid,
-					"taskName", taskCmd.Task.Name)
-				s.handleCreateTask(taskCmd.Task, topicRobotTaskDispatch)
+		switch taskGroupCmd.Type {
+		case pb.TaskGroupCommand_CREATE_TASKGROUP:
+			if taskGroupCmd.TaskgroupJson != "" {
+				logger.Info(" [GRPC STREAM] Received CREATE_TASKGROUP from Manager",
+					"taskGroupUID", taskGroupCmd.TaskgroupUid,
+					"robotName", taskGroupCmd.RobotName)
+				s.handleCreateTaskGroup(taskGroupCmd, topicRobotTaskGroupDispatch)
 			} else {
-				logger.Error(nil, "Received CREATE_TASK but task is nil")
+				logger.Error(nil, "Received CREATE_TASKGROUP but taskgroup_json is empty")
 			}
-		case pb.TaskCommand_DELETE_TASK:
-			if taskCmd.Task != nil {
-				logger.Info(" [GRPC STREAM] Received DELETE_TASK from Manager",
-					"taskUID", taskCmd.Task.Uid)
-				s.handleDeleteTask(taskCmd.Task)
+		case pb.TaskGroupCommand_DELETE_TASKGROUP:
+			if taskGroupCmd.TaskgroupUid != "" {
+				logger.Info(" [GRPC STREAM] Received DELETE_TASKGROUP from Manager",
+					"taskGroupUID", taskGroupCmd.TaskgroupUid,
+					"robotName", taskGroupCmd.RobotName)
+				s.handleDeleteTaskGroup(taskGroupCmd)
 			} else {
-				logger.Error(nil, "Received DELETE_TASK but task is nil")
+				logger.Error(nil, "Received DELETE_TASKGROUP but taskgroup_uid is empty")
 			}
-		case pb.TaskCommand_KEEPALIVE:
+		case pb.TaskGroupCommand_KEEPALIVE:
 			logger.V(1).Info("💓 Received KEEPALIVE from Manager")
 			// 发送 KEEPALIVE 响应
-			s.sendTaskEvent(&pb.TaskEvent{
-				Type:    pb.TaskEvent_KEEPALIVE,
-				TaskUid: "",
+			s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+				Type: pb.TaskGroupEvent_KEEPALIVE,
 			})
 		default:
-			logger.Info("Unknown TaskCommand type", "type", taskCmd.Type)
+			logger.Info("Unknown TaskGroupCommand type", "type", taskGroupCmd.Type)
 		}
 	}
 }
 
-// handleCreateTask 处理创建任务命令
-// 流程：接收 gRPC TaskCommand → 转发到 MQTT → 发送 ACK → 等待发布成功 → 发送 PUBLISHED
-func (s *GRPCStreamServer) handleCreateTask(task *pb.Task, topicTemplate string) {
+// handleCreateTaskGroup 处理创建 TaskGroup 命令
+// 流程：接收 gRPC TaskGroupCommand → 转发到 MQTT → 发送 ACK → 等待发布成功 → 发送 PUBLISHED
+func (s *GRPCStreamServer) handleCreateTaskGroup(cmd *pb.TaskGroupCommand, topicTemplate string) {
 	logger := log.FromContext(s.ctx)
 
+	dispatchKey := cmd.TaskgroupUid + "-" + cmd.RobotName
+
 	// 检查是否已分发
-	s.tasksMu.Lock()
-	if s.dispatchedTasks[task.Uid] {
-		logger.Info("Task already dispatched, skipping", "taskUID", task.Uid)
-		s.tasksMu.Unlock()
+	s.taskGroupsMu.Lock()
+	if s.dispatchedTaskGroups[dispatchKey] {
+		logger.Info("TaskGroup already dispatched, skipping",
+			"taskGroupUID", cmd.TaskgroupUid,
+			"robot", cmd.RobotName)
+		s.taskGroupsMu.Unlock()
 		return
 	}
-	s.dispatchedTasks[task.Uid] = true
-	s.tasksMu.Unlock()
+	s.dispatchedTaskGroups[dispatchKey] = true
+	s.taskGroupsMu.Unlock()
 
 	// 发送 ACK
-	s.sendTaskEvent(&pb.TaskEvent{
-		Type:    pb.TaskEvent_ACK,
-		TaskUid: task.Uid,
+	s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+		Type:         pb.TaskGroupEvent_ACK,
+		TaskgroupUid: cmd.TaskgroupUid,
+		RobotName:    cmd.RobotName,
 	})
 
 	// 转发到 MQTT
-	topic := fmt.Sprintf(topicTemplate, task.TargetRobot)
+	topic := fmt.Sprintf(topicTemplate, cmd.RobotName)
 
-	// 构造任务消息（简化版，包含必要信息）
-	taskMsg := map[string]interface{}{
-		"taskUid":     task.Uid,
-		"taskName":    task.Name,
-		"driver":      task.Driver,
-		"config":      task.Config,
-		"timeout":     task.Timeout,
-		"killTimeout": task.KillTimeout,
-		"env":         task.Env,
+	// 构造 TaskGroup 消息（使用完整的 JSON）
+	taskGroupMsg := map[string]interface{}{
+		"action":    "create",
+		"taskGroup": json.RawMessage(cmd.TaskgroupJson),
 	}
 
-	payload, err := json.Marshal(taskMsg)
+	payload, err := json.Marshal(taskGroupMsg)
 	if err != nil {
-		logger.Error(err, "Failed to marshal task message")
-		s.sendTaskEvent(&pb.TaskEvent{
-			Type:    pb.TaskEvent_ERROR,
-			TaskUid: task.Uid,
-			Message: fmt.Sprintf("Failed to marshal task: %v", err),
+		logger.Error(err, "Failed to marshal taskgroup message")
+		s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+			Type:         pb.TaskGroupEvent_ERROR,
+			TaskgroupUid: cmd.TaskgroupUid,
+			RobotName:    cmd.RobotName,
+			Message:      fmt.Sprintf("Failed to marshal taskgroup: %v", err),
 		})
 		return
 	}
@@ -251,56 +252,63 @@ func (s *GRPCStreamServer) handleCreateTask(task *pb.Task, topicTemplate string)
 	// 发布到 MQTT
 	token := s.mqttClient.Publish(topic, 1, false, payload)
 	if token.Wait() && token.Error() != nil {
-		logger.Error(token.Error(), "Failed to publish task to MQTT")
-		s.sendTaskEvent(&pb.TaskEvent{
-			Type:    pb.TaskEvent_ERROR,
-			TaskUid: task.Uid,
-			Message: fmt.Sprintf("MQTT publish failed: %v", token.Error()),
+		logger.Error(token.Error(), "Failed to publish taskgroup to MQTT")
+		s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+			Type:         pb.TaskGroupEvent_ERROR,
+			TaskgroupUid: cmd.TaskgroupUid,
+			RobotName:    cmd.RobotName,
+			Message:      fmt.Sprintf("MQTT publish failed: %v", token.Error()),
 		})
 		return
 	}
 
-	logger.Info(" [MQTT] Task dispatched successfully",
-		"taskUID", task.Uid,
-		"robot", task.TargetRobot,
+	logger.Info(" [MQTT] TaskGroup dispatched successfully",
+		"taskGroupUID", cmd.TaskgroupUid,
+		"robot", cmd.RobotName,
 		"topic", topic)
 
 	// 发送 PUBLISHED 事件
-	s.sendTaskEvent(&pb.TaskEvent{
-		Type:    pb.TaskEvent_PUBLISHED,
-		TaskUid: task.Uid,
+	s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+		Type:         pb.TaskGroupEvent_PUBLISHED,
+		TaskgroupUid: cmd.TaskgroupUid,
+		RobotName:    cmd.RobotName,
 	})
 }
 
-// handleDeleteTask 处理删除任务命令
-func (s *GRPCStreamServer) handleDeleteTask(task *pb.Task) {
+// handleDeleteTaskGroup 处理删除 TaskGroup 命令
+func (s *GRPCStreamServer) handleDeleteTaskGroup(cmd *pb.TaskGroupCommand) {
 	logger := log.FromContext(s.ctx)
-	logger.Info("Handling DELETE_TASK", "taskUID", task.Uid)
+	logger.Info("Handling DELETE_TASKGROUP",
+		"taskGroupUID", cmd.TaskgroupUid,
+		"robot", cmd.RobotName)
 
 	// 清除已分发标记
-	s.tasksMu.Lock()
-	delete(s.dispatchedTasks, task.Uid)
-	s.tasksMu.Unlock()
+	dispatchKey := cmd.TaskgroupUid + "-" + cmd.RobotName
+	s.taskGroupsMu.Lock()
+	delete(s.dispatchedTaskGroups, dispatchKey)
+	s.taskGroupsMu.Unlock()
 
-	// TODO: 通知 Agent 取消任务（如果支持）
-	s.sendTaskEvent(&pb.TaskEvent{
-		Type:    pb.TaskEvent_ACK,
-		TaskUid: task.Uid,
+	// TODO: 通知 Agent 取消 TaskGroup（如果支持）
+	s.sendTaskGroupEvent(&pb.TaskGroupEvent{
+		Type:         pb.TaskGroupEvent_ACK,
+		TaskgroupUid: cmd.TaskgroupUid,
+		RobotName:    cmd.RobotName,
 	})
 }
 
-// sendTaskEvent 发送 TaskEvent 到 Manager
-func (s *GRPCStreamServer) sendTaskEvent(event *pb.TaskEvent) {
+// sendTaskGroupEvent 发送 TaskGroupEvent 到 Manager
+func (s *GRPCStreamServer) sendTaskGroupEvent(event *pb.TaskGroupEvent) {
 	logger := log.FromContext(s.ctx)
 
-	if err := s.taskStream.Send(event); err != nil {
-		logger.Error(err, "Failed to send TaskEvent to Manager", "type", event.Type)
+	if err := s.taskGroupStream.Send(event); err != nil {
+		logger.Error(err, "Failed to send TaskGroupEvent to Manager", "type", event.Type)
 		return
 	}
 
-	logger.V(1).Info(" [GRPC STREAM] Sent TaskEvent to Manager",
+	logger.V(1).Info(" [GRPC STREAM] Sent TaskGroupEvent to Manager",
 		"type", event.Type,
-		"taskUID", event.TaskUid)
+		"taskGroupUID", event.TaskgroupUid,
+		"robot", event.RobotName)
 }
 
 // connectMQTT 连接 MQTT Broker
@@ -338,9 +346,9 @@ func (s *GRPCStreamServer) subscribeTopics() {
 	logger := log.FromContext(s.ctx)
 
 	const (
-		topicRegister                = "k8s4r/register"
-		topicHeartbeat               = "k8s4r/heartbeat"
-		topicRobotTaskStatusWildcard = "k8s4r/robots/+/tasks/+/status"
+		topicRegister                     = "k8s4r/register"
+		topicHeartbeat                    = "k8s4r/heartbeat"
+		topicRobotTaskGroupStatusWildcard = "robot/+/taskgroup/status"
 	)
 
 	// 订阅注册消息
@@ -353,12 +361,15 @@ func (s *GRPCStreamServer) subscribeTopics() {
 		logger.Error(token.Error(), "Failed to subscribe to heartbeat topic")
 	}
 
-	// 订阅任务状态消息（通配符）
-	if token := s.mqttClient.Subscribe(topicRobotTaskStatusWildcard, 1, s.handleTaskStatus); token.Wait() && token.Error() != nil {
-		logger.Error(token.Error(), "Failed to subscribe to task status topic")
+	// 订阅 TaskGroup 状态消息（通配符）
+	if token := s.mqttClient.Subscribe(topicRobotTaskGroupStatusWildcard, 1, s.handleTaskGroupStatus); token.Wait() && token.Error() != nil {
+		logger.Error(token.Error(), "Failed to subscribe to taskgroup status topic")
 	}
 
-	logger.Info(" Subscribed to MQTT topics")
+	logger.Info(" Subscribed to MQTT topics",
+		"register", topicRegister,
+		"heartbeat", topicHeartbeat,
+		"taskGroupStatus", topicRobotTaskGroupStatusWildcard)
 }
 
 // handleRegister 处理 Agent 注册消息
@@ -471,10 +482,43 @@ func (s *GRPCStreamServer) handleHeartbeat(client mqtt.Client, msg mqtt.Message)
 		return
 	}
 
-	logger.V(1).Info(" [GRPC] Heartbeat reported to Manager", "success", resp.Success)
+	logger.Info(" [GRPC] Heartbeat reported to Manager", "success", resp.Success)
 }
 
-// handleTaskStatus 处理 Agent 任务状态上报
+// handleTaskGroupStatus 处理 Agent TaskGroup 状态上报（新版）
+// MQTT → 直接记录（不需要通过 gRPC，因为 Manager 会通过 K8s API 更新）
+func (s *GRPCStreamServer) handleTaskGroupStatus(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
+
+	logger.Info(" [MQTT] Received TaskGroup status message",
+		"topic", msg.Topic(),
+		"payload", string(msg.Payload()))
+
+	var status struct {
+		TaskGroupUID string            `json:"taskGroupUid"`
+		RobotName    string            `json:"robotName"`
+		State        string            `json:"state"`
+		Message      string            `json:"message"`
+		TaskStates   map[string]string `json:"taskStates"`
+		UpdatedAt    string            `json:"updatedAt"`
+	}
+
+	if err := json.Unmarshal(msg.Payload(), &status); err != nil {
+		logger.Error(err, "Failed to unmarshal taskgroup status")
+		return
+	}
+
+	logger.Info(" [MQTT] Parsed TaskGroup status",
+		"taskGroupUID", status.TaskGroupUID,
+		"robot", status.RobotName,
+		"state", status.State,
+		"taskStates", status.TaskStates)
+
+	// TODO: 如果需要，可以通过 gRPC 上报给 Manager
+	// 目前 Manager 通过 K8s API 监听状态变化，Server 只负责转发
+}
+
+// handleTaskStatus 处理 Agent 任务状态上报（旧版，已废弃）
 // MQTT → gRPC Unary RPC
 func (s *GRPCStreamServer) handleTaskStatus(client mqtt.Client, msg mqtt.Message) {
 	logger := log.FromContext(s.ctx)

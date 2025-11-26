@@ -38,12 +38,17 @@ const (
 
 	// 机器人专属 Topics（双向通信）
 	// Server → Agent（使用具体的 robotId）
-	TopicRobotResponse     = "k8s4r/robots/%s/response"       // Server 发送：k8s4r/robots/{robotId}/response
-	TopicRobotTaskDispatch = "k8s4r/robots/%s/tasks/dispatch" // Server 发送：k8s4r/robots/{robotId}/tasks/dispatch
-	TopicRobotTaskState    = "k8s4r/robots/%s/tasks/state"    // Server 发送：k8s4r/robots/{robotId}/tasks/state（retained消息，用于Agent重启恢复）
+	TopicRobotResponse          = "k8s4r/robots/%s/response" // Server 发送：k8s4r/robots/{robotId}/response
+	TopicRobotTaskGroupDispatch = "robot/%s/taskgroup"       // Server 发送 TaskGroup：robot/{robotName}/taskgroup
+	TopicRobotTaskGroupState    = "robot/%s/taskgroup/state" // Server 发送状态（retained）：robot/{robotName}/taskgroup/state
 
 	// Agent → Server（Server 使用通配符订阅，Agent 发布到具体 topic）
-	TopicRobotTaskStatus = "k8s4r/robots/+/tasks/+/status" // Server 订阅通配符，Agent 发送：k8s4r/robots/{robotId}/tasks/{taskUID}/status
+	TopicRobotTaskGroupStatus = "robot/+/taskgroup/status" // Server 订阅：Agent 发送 robot/{robotName}/taskgroup/status
+
+	// 旧版 Task Topics（兼容性保留，后续可删除）
+	TopicRobotTaskDispatch = "k8s4r/robots/%s/tasks/dispatch" // 已废弃
+	TopicRobotTaskState    = "k8s4r/robots/%s/tasks/state"    // 已废弃
+	TopicRobotTaskStatus   = "k8s4r/robots/+/tasks/+/status"  // 已废弃
 )
 
 // Server MQTT 服务器，负责四个核心职责：
@@ -80,7 +85,7 @@ type Response struct {
 	RobotID string `json:"robotId,omitempty"`
 }
 
-// TaskStatusMessage Agent 上报的任务状态
+// TaskStatusMessage Agent 上报的任务状态（旧版，兼容性保留）
 type TaskStatusMessage struct {
 	TaskUID   string    `json:"taskUid"`
 	RobotName string    `json:"robotName"`
@@ -89,6 +94,16 @@ type TaskStatusMessage struct {
 	Message   string    `json:"message"`
 	Event     string    `json:"event"` // 事件类型：Assigned, Downloading, DownloadFailed, Starting, Started, Completed, Failed
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// TaskGroupStatusMessage Agent 上报的 TaskGroup 状态（新版）
+type TaskGroupStatusMessage struct {
+	TaskGroupUID string            `json:"taskGroupUid"`
+	RobotName    string            `json:"robotName"`
+	State        string            `json:"state"` // pending, running, completed, failed
+	Message      string            `json:"message"`
+	TaskStates   map[string]string `json:"taskStates"` // taskName -> state
+	UpdatedAt    time.Time         `json:"updatedAt"`
 }
 
 // NewServer 创建 Server 实例
@@ -228,7 +243,7 @@ func (s *Server) HeartbeatHandler(client mqtt.Client, msg mqtt.Message) {
 		"annotation", "k8s4r.io/last-heartbeat")
 }
 
-// TaskStatusHandler 处理任务状态上报（MQTT → K8s）
+// TaskStatusHandler 处理任务状态上报（MQTT → K8s）（旧版，兼容性保留）
 func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 	logger := log.FromContext(s.ctx)
 
@@ -307,6 +322,81 @@ func (s *Server) TaskStatusHandler(client mqtt.Client, msg mqtt.Message) {
 
 	logger.Info("Task status updated",
 		"task", task.Name,
+		"oldState", oldState,
+		"newState", newState,
+		"message", statusMsg.Message)
+}
+
+// TaskGroupStatusHandler 处理 TaskGroup 状态上报（MQTT → K8s）（新版）
+func (s *Server) TaskGroupStatusHandler(client mqtt.Client, msg mqtt.Message) {
+	logger := log.FromContext(s.ctx)
+
+	var statusMsg TaskGroupStatusMessage
+	if err := json.Unmarshal(msg.Payload(), &statusMsg); err != nil {
+		logger.Error(err, "Failed to decode taskgroup status message")
+		return
+	}
+
+	logger.Info("📊 Received TaskGroup status update",
+		"taskGroupUID", statusMsg.TaskGroupUID,
+		"robotName", statusMsg.RobotName,
+		"state", statusMsg.State,
+		"message", statusMsg.Message,
+		"taskStates", statusMsg.TaskStates)
+
+	// 查找对应的 TaskGroup
+	taskGroupList := &robotv1alpha1.TaskGroupList{}
+	if err := s.Client.List(s.ctx, taskGroupList); err != nil {
+		logger.Error(err, "Failed to list taskgroups")
+		return
+	}
+
+	var taskGroup *robotv1alpha1.TaskGroup
+	for i := range taskGroupList.Items {
+		tg := &taskGroupList.Items[i]
+		if string(tg.UID) == statusMsg.TaskGroupUID {
+			taskGroup = tg
+			break
+		}
+	}
+
+	if taskGroup == nil {
+		logger.Error(nil, "TaskGroup not found", "taskGroupUID", statusMsg.TaskGroupUID)
+		return
+	}
+
+	// 记录状态变更
+	oldState := taskGroup.Status.State
+	newState := robotv1alpha1.TaskGroupState(statusMsg.State)
+
+	// 更新 TaskGroup 状态
+	taskGroup.Status.State = newState
+	taskGroup.Status.StatusDescription = statusMsg.Message
+
+	// 统计 Task 状态
+	var running, completed, failed int32
+	for _, state := range statusMsg.TaskStates {
+		switch state {
+		case "running":
+			running++
+		case "completed":
+			completed++
+		case "failed":
+			failed++
+		}
+	}
+
+	taskGroup.Status.RunningTasks = running
+	taskGroup.Status.SucceededTasks = completed
+	taskGroup.Status.FailedTasks = failed
+
+	if err := s.Client.Status().Update(s.ctx, taskGroup); err != nil {
+		logger.Error(err, "Failed to update taskgroup status", "taskGroup", taskGroup.Name)
+		return
+	}
+
+	logger.Info("✅ TaskGroup status updated",
+		"taskGroup", taskGroup.Name,
 		"oldState", oldState,
 		"newState", newState,
 		"message", statusMsg.Message)
@@ -391,7 +481,131 @@ func (s *Server) StartTaskWatcher(ctx context.Context) error {
 	return nil
 }
 
-// dispatchTaskToMQTT 将 Task 通过 MQTT 转发给 Agent
+// StartTaskGroupWatcher 监听 TaskGroup 状态变化，转发到 MQTT（新版）
+// 当 TaskGroup.Status.State = "scheduled" 时触发转发
+func (s *Server) StartTaskGroupWatcher(ctx context.Context) error {
+	logger := log.FromContext(ctx)
+	logger.Info("🔍 Starting TaskGroup watcher")
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		dispatchedTaskGroups := make(map[string]bool) // 记录已分发的 TaskGroup
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				taskGroupList := &robotv1alpha1.TaskGroupList{}
+				if err := s.Client.List(ctx, taskGroupList); err != nil {
+					logger.Error(err, "Failed to list taskgroups")
+					continue
+				}
+
+				for i := range taskGroupList.Items {
+					taskGroup := &taskGroupList.Items[i]
+					taskGroupKey := string(taskGroup.UID)
+
+					// 如果状态是 scheduled 且未分发过，则转发到 MQTT
+					if taskGroup.Status.State == robotv1alpha1.TaskGroupStateScheduled && !dispatchedTaskGroups[taskGroupKey] {
+						// TaskGroup 的 AssignedRobots 包含多个副本，每个副本分配给一个机器人
+						// 我们需要为每个分配的机器人发送一份 TaskGroup
+						for _, assignment := range taskGroup.Status.AssignedRobots {
+							if err := s.dispatchTaskGroupToMQTT(ctx, taskGroup, assignment.RobotName); err != nil {
+								logger.Error(err, "Failed to dispatch taskgroup to MQTT",
+									"taskGroup", taskGroup.Name,
+									"robot", assignment.RobotName,
+									"replica", assignment.ReplicaIndex)
+							} else {
+								logger.Info("📤 TaskGroup dispatched to robot",
+									"taskGroup", taskGroup.Name,
+									"robot", assignment.RobotName,
+									"replica", assignment.ReplicaIndex)
+							}
+						}
+						dispatchedTaskGroups[taskGroupKey] = true
+					}
+
+					// 如果 TaskGroup 被删除，发送删除消息
+					if taskGroup.DeletionTimestamp != nil && !dispatchedTaskGroups[taskGroupKey+"-delete"] {
+						for _, assignment := range taskGroup.Status.AssignedRobots {
+							if err := s.deleteTaskGroupViaMQTT(ctx, taskGroup, assignment.RobotName); err != nil {
+								logger.Error(err, "Failed to send delete taskgroup message",
+									"taskGroup", taskGroup.Name,
+									"robot", assignment.RobotName)
+							}
+						}
+						dispatchedTaskGroups[taskGroupKey+"-delete"] = true
+					}
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// dispatchTaskGroupToMQTT 将 TaskGroup 通过 MQTT 转发给指定 Agent
+func (s *Server) dispatchTaskGroupToMQTT(ctx context.Context, taskGroup *robotv1alpha1.TaskGroup, robotName string) error {
+	logger := log.FromContext(ctx)
+
+	// 构造 MQTT 消息
+	msg := map[string]interface{}{
+		"action":    "create",
+		"taskGroup": taskGroup,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal taskgroup message: %w", err)
+	}
+
+	// 发送到目标 Robot 的 TaskGroup dispatch topic
+	topic := fmt.Sprintf(TopicRobotTaskGroupDispatch, robotName)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	token.Wait()
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("failed to publish taskgroup: %w", err)
+	}
+
+	logger.Info("📨 TaskGroup dispatched to MQTT",
+		"taskGroup", taskGroup.Name,
+		"robot", robotName,
+		"topic", topic)
+
+	return nil
+}
+
+// deleteTaskGroupViaMQTT 通过 MQTT 发送 TaskGroup 删除消息
+func (s *Server) deleteTaskGroupViaMQTT(ctx context.Context, taskGroup *robotv1alpha1.TaskGroup, robotName string) error {
+	logger := log.FromContext(ctx)
+
+	msg := map[string]interface{}{
+		"action":    "delete",
+		"taskGroup": taskGroup,
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal delete message: %w", err)
+	}
+
+	topic := fmt.Sprintf(TopicRobotTaskGroupDispatch, robotName)
+	token := s.mqttClient.Publish(topic, 1, false, payload)
+	token.Wait()
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("failed to publish delete message: %w", err)
+	}
+
+	logger.Info("Delete taskgroup message sent",
+		"taskGroup", taskGroup.Name,
+		"robot", robotName)
+	return nil
+}
+
+// dispatchTaskToMQTT 将 Task 通过 MQTT 转发给 Agent（旧版，兼容性保留）
 // 发送成功后，将 Task 状态从 pending 更新为 dispatching
 func (s *Server) dispatchTaskToMQTT(ctx context.Context, task *robotv1alpha1.Task) error {
 	logger := log.FromContext(ctx)
@@ -542,13 +756,17 @@ func (s *Server) Start(ctx context.Context, brokerURL string) error {
 		client.Subscribe(TopicRegister, 1, s.RegisterHandler)
 		client.Subscribe(TopicHeartbeat, 1, s.HeartbeatHandler)
 
-		// 订阅所有机器人的任务状态上报（使用通配符）
+		// 订阅 TaskGroup 状态上报（新版）
+		client.Subscribe(TopicRobotTaskGroupStatus, 1, s.TaskGroupStatusHandler)
+
+		// 订阅任务状态上报（旧版，兼容性保留）
 		client.Subscribe(TopicRobotTaskStatus, 1, s.TaskStatusHandler)
 
 		logger.Info("Subscribed to MQTT topics",
 			"register", TopicRegister,
 			"heartbeat", TopicHeartbeat,
-			"taskStatus", TopicRobotTaskStatus)
+			"taskGroupStatus", TopicRobotTaskGroupStatus,
+			"taskStatus(deprecated)", TopicRobotTaskStatus)
 	})
 
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {

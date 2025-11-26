@@ -8,7 +8,7 @@ all: build
 
 # 安装 controller-gen (使用更新的版本以兼容 Go 1.24)
 controller-gen:
-	@which controller-gen > /dev/null || (echo "Installing controller-gen..." && go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
+	@which controller-gen > /dev/null || (echo "Installing controller-gen..." && GOPROXY=https://goproxy.cn,direct go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
 
 # 生成 CRD manifests
 manifests: controller-gen
