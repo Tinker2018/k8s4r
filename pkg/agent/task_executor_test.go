@@ -20,7 +20,7 @@ func TestTaskExecutor_NormalCompletion(t *testing.T) {
 	})
 
 	baseDir := "/tmp/k8s4r-test-normal"
-	nomadDriver := driver.NewNomadExecDriver(baseDir, logger)
+	nomadDriver := driver.NewExecDriver(baseDir, logger)
 
 	task := &robotv1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -106,7 +106,7 @@ func TestTaskExecutor_Timeout(t *testing.T) {
 	})
 
 	baseDir := "/tmp/k8s4r-test-timeout"
-	nomadDriver := driver.NewNomadExecDriver(baseDir, logger)
+	nomadDriver := driver.NewExecDriver(baseDir, logger)
 
 	task := &robotv1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -190,7 +190,7 @@ func TestTaskExecutor_Kill(t *testing.T) {
 	})
 
 	baseDir := "/tmp/k8s4r-test-kill"
-	nomadDriver := driver.NewNomadExecDriver(baseDir, logger)
+	nomadDriver := driver.NewExecDriver(baseDir, logger)
 
 	task := &robotv1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{

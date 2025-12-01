@@ -92,19 +92,12 @@ func (h *SharedStorageHook) prepareTaskStorage(ctx context.Context, task *robotv
 
 	// 1. 确保 TaskGroup 共享目录存在，并且创建存储artifacts的目录
 	taskGroupDir := filepath.Join(h.baseDir, taskGroupName)
-	sharedDir := filepath.Join(taskGroupDir, "shared")
-	artifactsDir := filepath.Join(sharedDir, "local")
 
-	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create shared artifacts dir %s: %w", artifactsDir, err)
+	if err := os.MkdirAll(taskGroupDir, 0755); err != nil {
+		return fmt.Errorf("failed to create taskGroupDir dir %s: %w", taskGroupDir, err)
 	}
 
-	// 记录共享目录
-	h.taskGroupDirs[taskGroupName] = sharedDir
-
-	h.logger.Debug("created TaskGroup shared directory",
-		"taskGroup", taskGroupName,
-		"sharedDir", sharedDir)
+	h.logger.Debug("created TaskGroup shared directory")
 
 	// 2. 为当前 Task 下载具体文件存储到 task 的工作目录
 	// taskDir 由 Executor 创建，我们需要知道它的路径；如果不存在则创建
@@ -165,27 +158,27 @@ func (h *SharedStorageHook) downloadArtifacts(ctx context.Context, artifacts []r
 	return nil
 }
 
-// cleanupTaskGroupStorage 清理 TaskGroup 的共享存储
+// cleanupTaskGroupStorage 清理 TaskGroup 的共享存储, 这里我们先不删除，因为shared被挂载为根目录
 func (h *SharedStorageHook) cleanupTaskGroupStorage(taskGroupName string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	sharedDir, exists := h.taskGroupDirs[taskGroupName]
-	if !exists {
-		return nil
-	}
+	// sharedDir, exists := h.taskGroupDirs[taskGroupName]
+	// if !exists {
+	// 	return nil
+	// }
 
-	// 删除共享目录
-	if err := os.RemoveAll(sharedDir); err != nil {
-		h.logger.Warn("failed to remove TaskGroup shared directory",
-			"taskGroup", taskGroupName,
-			"sharedDir", sharedDir,
-			"error", err)
-	} else {
-		h.logger.Info("TaskGroup shared directory cleaned up",
-			"taskGroup", taskGroupName,
-			"sharedDir", sharedDir)
-	}
+	// // 删除共享目录
+	// if err := os.RemoveAll(sharedDir); err != nil {
+	// 	h.logger.Warn("failed to remove TaskGroup shared directory",
+	// 		"taskGroup", taskGroupName,
+	// 		"sharedDir", sharedDir,
+	// 		"error", err)
+	// } else {
+	// 	h.logger.Info("TaskGroup shared directory cleaned up",
+	// 		"taskGroup", taskGroupName,
+	// 		"sharedDir", sharedDir)
+	// }
 
 	delete(h.taskGroupDirs, taskGroupName)
 	return nil

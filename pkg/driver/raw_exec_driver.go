@@ -22,11 +22,14 @@ import (
 	"github.com/hashicorp/nomad/drivers/shared/executor"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/drivers"
-) // NomadExecDriver 使用 Nomad 的 executor 实现的驱动
+)
+
+// RawExecDriver 使用 Nomad 的 executor 实现的驱动
+// RawExecDriver 和 ExecDriver是一样的，唯一的区别是创建的时候走的函数不同
 // 这是真正使用 Nomad 代码的实现，提供完整的进程隔离、日志管理、资源监控
-type NomadExecDriver struct {
+type RawExecDriver struct {
 	mu            sync.RWMutex
-	tasks         map[string]*nomadTaskHandle
+	tasks         map[string]*taskHandle
 	logger        hclog.Logger
 	baseDir       string
 	compute       cpustats.Compute
@@ -34,20 +37,8 @@ type NomadExecDriver struct {
 	cgroupsInited bool
 }
 
-// nomadTaskHandle Nomad executor 的任务句柄
-type nomadTaskHandle struct {
-	TaskHandle
-	exec            executor.Executor
-	taskDir         string
-	logDir          string
-	doneCh          chan struct{}
-	exitState       *executor.ProcessState
-	pluginCtx       context.Context
-	pluginCtxCancel context.CancelFunc
-}
-
-// NewNomadExecDriver 创建使用 Nomad executor 的驱动
-func NewNomadExecDriver(baseDir string, logger hclog.Logger) *NomadExecDriver {
+// NewRawExecDriver 创建使用 Nomad executor 的驱动
+func NewRawExecDriver(baseDir string, logger hclog.Logger) *RawExecDriver {
 	if logger == nil {
 		logger = hclog.NewNullLogger()
 	}
@@ -60,8 +51,8 @@ func NewNomadExecDriver(baseDir string, logger hclog.Logger) *NomadExecDriver {
 		NumCores: runtime.NumCPU(),
 	}
 
-	return &NomadExecDriver{
-		tasks:         make(map[string]*nomadTaskHandle),
+	return &RawExecDriver{
+		tasks:         make(map[string]*taskHandle),
 		logger:        logger.Named("nomad_exec_driver"),
 		baseDir:       baseDir,
 		compute:       compute,
@@ -72,7 +63,7 @@ func NewNomadExecDriver(baseDir string, logger hclog.Logger) *NomadExecDriver {
 // // initCgroups 初始化 Nomad cgroups 父目录（只需要初始化一次）
 // // 这模拟了 Nomad client 的 cgroup 初始化过程
 // // 注意：调用者必须已持有 d.mu 锁
-// func (d *NomadExecDriver) initCgroups() error {
+// func (d *RawExecDriver) initCgroups() error {
 // 	d.logger.Info(">>> ENTERING initCgroups() <<<")
 
 // 	if d.cgroupsInited {
@@ -99,19 +90,19 @@ func NewNomadExecDriver(baseDir string, logger hclog.Logger) *NomadExecDriver {
 // }
 
 // Name 返回驱动名称
-func (d *NomadExecDriver) Name() string {
+func (d *RawExecDriver) Name() string {
 	return "nomad-exec"
 }
 
 // SetEventCallback 设置事件回调
-func (d *NomadExecDriver) SetEventCallback(callback EventCallback) {
+func (d *RawExecDriver) SetEventCallback(callback EventCallback) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.eventCallback = callback
 }
 
 // emitEvent 触发事件回调（调用者必须已持有锁或在锁外调用）
-func (d *NomadExecDriver) emitEvent(taskUID, event, message string) {
+func (d *RawExecDriver) emitEvent(taskUID, event, message string) {
 	// 注意：这里不获取锁，因为通常从已持有锁的方法中调用
 	// 如果callback为nil，直接返回避免panic
 	callback := d.eventCallback
@@ -127,7 +118,7 @@ func (d *NomadExecDriver) emitEvent(taskUID, event, message string) {
 }
 
 // Start 启动任务（使用 Nomad executor）
-func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (*TaskHandle, error) {
+func (d *RawExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (*TaskHandle, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -173,11 +164,9 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 	}
 
 	// 创建 Nomad executor（使用完整隔离模式）
-	// NewExecutorWithIsolation 提供：
+	// NewExecutor 提供：
 	// 1. cgroup 资源隔离（CPU、内存限制）
-	// 2. chroot 文件系统隔离（进程只能看到 TaskDir）
-	// 3. 需要通过 Mounts 挂载系统二进制文件才能运行系统命令
-	execImpl := executor.NewExecutorWithIsolation(d.logger, d.compute)
+	execImpl := executor.NewExecutor(d.logger, d.compute)
 
 	// cgroup tree初始化操作（需要 root 权限）
 	// if err := d.initCgroups(); err != nil {
@@ -300,7 +289,7 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 		"stderr", execCmd.StderrPath)
 
 	// 创建任务句柄
-	handle := &nomadTaskHandle{
+	handle := &taskHandle{
 		TaskHandle: TaskHandle{
 			TaskID:     taskID,
 			DriverName: d.Name(),
@@ -330,7 +319,7 @@ func (d *NomadExecDriver) Start(ctx context.Context, task *robotv1alpha1.Task) (
 }
 
 // Stop 停止任务（使用 Nomad 的优雅停止机制）
-func (d *NomadExecDriver) Stop(ctx context.Context, handle *TaskHandle) error {
+func (d *RawExecDriver) Stop(ctx context.Context, handle *TaskHandle) error {
 	d.mu.Lock()
 	h, exists := d.tasks[handle.TaskID]
 	d.mu.Unlock()
@@ -363,7 +352,7 @@ func (d *NomadExecDriver) Stop(ctx context.Context, handle *TaskHandle) error {
 }
 
 // Status 获取任务状态（使用 Nomad 的 Stats 获取资源信息）
-func (d *NomadExecDriver) Status(ctx context.Context, handle *TaskHandle) (*TaskStatus, error) {
+func (d *RawExecDriver) Status(ctx context.Context, handle *TaskHandle) (*TaskStatus, error) {
 	d.mu.RLock()
 	h, exists := d.tasks[handle.TaskID]
 	d.mu.RUnlock()
@@ -416,7 +405,7 @@ func (d *NomadExecDriver) Status(ctx context.Context, handle *TaskHandle) (*Task
 }
 
 // GetLogs 获取任务日志（从 Nomad 管理的日志文件读取）
-func (d *NomadExecDriver) GetLogs(ctx context.Context, handle *TaskHandle, stdout bool, tail int) (string, error) {
+func (d *RawExecDriver) GetLogs(ctx context.Context, handle *TaskHandle, stdout bool, tail int) (string, error) {
 	d.mu.RLock()
 	h, exists := d.tasks[handle.TaskID]
 	d.mu.RUnlock()
@@ -453,7 +442,7 @@ func (d *NomadExecDriver) GetLogs(ctx context.Context, handle *TaskHandle, stdou
 }
 
 // Destroy 清理任务资源
-func (d *NomadExecDriver) Destroy(ctx context.Context, handle *TaskHandle) error {
+func (d *RawExecDriver) Destroy(ctx context.Context, handle *TaskHandle) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -480,7 +469,7 @@ func (d *NomadExecDriver) Destroy(ctx context.Context, handle *TaskHandle) error
 // --- 私有方法 ---
 
 // waitTask 等待任务结束（使用 Nomad 的 Wait 方法）
-func (d *NomadExecDriver) waitTask(h *nomadTaskHandle) {
+func (d *RawExecDriver) waitTask(h *taskHandle) {
 	defer close(h.doneCh)
 
 	// 使用 Nomad executor 的 Wait 方法等待进程结束
@@ -513,7 +502,7 @@ func (d *NomadExecDriver) waitTask(h *nomadTaskHandle) {
 }
 
 // streamLogs 实时流式输出任务日志（tail -f 方式）
-func (d *NomadExecDriver) streamLogs(h *nomadTaskHandle, logPath string, streamName string) {
+func (d *RawExecDriver) streamLogs(h *taskHandle, logPath string, streamName string) {
 	// 等待日志文件创建
 	for i := 0; i < 50; i++ {
 		if _, err := os.Stat(logPath); err == nil {
@@ -583,32 +572,8 @@ func (d *NomadExecDriver) streamLogs(h *nomadTaskHandle, logPath string, streamN
 	}
 }
 
-// 辅助函数
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i+1])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func joinLines(lines []string) string {
-	result := ""
-	for _, line := range lines {
-		result += line
-	}
-	return result
-}
-
 // GetResourceStats 获取实时资源统计（演示 Nomad Stats 的完整用法）
-func (d *NomadExecDriver) GetResourceStats(ctx context.Context, handle *TaskHandle, interval time.Duration) (<-chan *cstructs.TaskResourceUsage, error) {
+func (d *RawExecDriver) GetResourceStats(ctx context.Context, handle *TaskHandle, interval time.Duration) (<-chan *cstructs.TaskResourceUsage, error) {
 	d.mu.RLock()
 	h, exists := d.tasks[handle.TaskID]
 	d.mu.RUnlock()
@@ -622,7 +587,7 @@ func (d *NomadExecDriver) GetResourceStats(ctx context.Context, handle *TaskHand
 }
 
 // downloadArtifacts 使用 go-getter 下载 artifacts
-func (d *NomadExecDriver) downloadArtifacts(ctx context.Context, artifacts []robotv1alpha1.TaskArtifact, destDir string) error {
+func (d *RawExecDriver) downloadArtifacts(ctx context.Context, artifacts []robotv1alpha1.TaskArtifact, destDir string) error {
 	d.logger.Info("starting artifact downloads", "count", len(artifacts), "destDir", destDir)
 
 	for i, artifact := range artifacts {
@@ -726,41 +691,4 @@ func (d *NomadExecDriver) downloadArtifacts(ctx context.Context, artifacts []rob
 
 	d.logger.Info("all artifacts downloaded successfully", "count", len(artifacts))
 	return nil
-}
-
-// downloadProgress 实现 go-getter 的进度监听器
-type downloadProgress struct {
-	logger      hclog.Logger
-	source      string
-	lastLog     time.Time
-	logInterval time.Duration
-}
-
-func (p *downloadProgress) TrackProgress(src string, currentSize, totalSize int64, stream io.ReadCloser) io.ReadCloser {
-	// 初始化 logInterval（默认10秒）
-	if p.logInterval == 0 {
-		p.logInterval = 10 * time.Second
-	}
-
-	// 检查是否应该输出日志
-	now := time.Now()
-	if now.Sub(p.lastLog) >= p.logInterval {
-		p.lastLog = now
-
-		if totalSize > 0 {
-			percent := float64(currentSize) / float64(totalSize) * 100
-			p.logger.Info("download progress",
-				"source", p.source,
-				"current", currentSize,
-				"total", totalSize,
-				"percent", fmt.Sprintf("%.1f%%", percent))
-		} else {
-			p.logger.Info("download progress",
-				"source", p.source,
-				"current", currentSize,
-				"status", "streaming")
-		}
-	}
-
-	return stream
 }

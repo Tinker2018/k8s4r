@@ -51,29 +51,56 @@ type DriverFactory interface {
 }
 
 // SimpleDriverFactory 简单的驱动工厂实现
+// 注意：同一个 TaskGroup 的所有 Task 共享同一个 driver 实例，以支持 OverlayFS 等共享资源
 type SimpleDriverFactory struct {
-	nomadDriver driver.TaskDriver
-	logger      hclog.Logger
+	logger    hclog.Logger
+	baseDir   string
+	mu        sync.Mutex
+	drivers   map[robotv1alpha1.TaskDriverType]driver.TaskDriver // 缓存 driver 实例
+	overlayMu sync.RWMutex                                       // 共享的 overlay 锁
 }
 
 // NewSimpleDriverFactory 创建简单驱动工厂
-func NewSimpleDriverFactory(nomadDriver driver.TaskDriver, logger hclog.Logger) *SimpleDriverFactory {
+func NewSimpleDriverFactory(logger hclog.Logger) *SimpleDriverFactory {
 	return &SimpleDriverFactory{
-		nomadDriver: nomadDriver,
-		logger:      logger,
+		logger:  logger,
+		baseDir: "", // 使用默认路径
+		drivers: make(map[robotv1alpha1.TaskDriverType]driver.TaskDriver),
 	}
 }
 
-// CreateDriver 根据类型创建 driver
+// NewSimpleDriverFactoryWithBaseDir 创建简单驱动工厂（指定baseDir）
+func NewSimpleDriverFactoryWithBaseDir(baseDir string, logger hclog.Logger) *SimpleDriverFactory {
+	return &SimpleDriverFactory{
+		logger:  logger,
+		baseDir: baseDir,
+		drivers: make(map[robotv1alpha1.TaskDriverType]driver.TaskDriver),
+	}
+}
+
+// CreateDriver 根据类型创建 driver（单例模式，同一 TaskGroup 共享）
 func (f *SimpleDriverFactory) CreateDriver(driverType robotv1alpha1.TaskDriverType) (driver.TaskDriver, error) {
-	// 目前只支持 exec driver（使用 Nomad executor）
-	// 未来可以扩展支持 docker、java 等
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// 检查是否已创建（单例模式）
+	if d, exists := f.drivers[driverType]; exists {
+		return d, nil
+	}
+
+	// 首次创建，传递共享的 overlayMu
+	var d driver.TaskDriver
 	switch driverType {
-	case "exec", "raw_exec":
-		return driver.NewNomadExecDriver("", hclog.NewNullLogger()), nil
+	case robotv1alpha1.TaskDriverExec:
+		d = driver.NewExecDriver(f.baseDir, f.logger, &f.overlayMu)
+	case robotv1alpha1.TaskDriverRawExec:
+		d = driver.NewRawExecDriver(f.baseDir, f.logger)
 	default:
 		return nil, fmt.Errorf("unsupported driver type: %s", driverType)
 	}
+
+	f.drivers[driverType] = d
+	return d, nil
 }
 
 type TaskGroupState int

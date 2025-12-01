@@ -21,7 +21,7 @@ func TestNomadExecutorFeatures(t *testing.T) {
 	})
 
 	// 创建使用 Nomad executor 的驱动
-	d := driver.NewNomadExecDriver("/tmp/k8s4r-test", logger)
+	d := driver.NewExecDriver("/tmp/k8s4r-test", logger)
 
 	// 创建测试任务
 	task := &robotv1alpha1.Task{
@@ -111,7 +111,7 @@ func TestNomadGracefulShutdown(t *testing.T) {
 		Level: hclog.Debug,
 	})
 
-	d := driver.NewNomadExecDriver("/tmp/k8s4r-test", logger)
+	d := driver.NewExecDriver("/tmp/k8s4r-test", logger)
 
 	// 创建长时间运行的任务
 	task := &robotv1alpha1.Task{

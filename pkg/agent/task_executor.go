@@ -228,9 +228,6 @@ func (te *TaskExecutor) Start(ctx context.Context) error {
 
 // Stop 停止任务
 func (te *TaskExecutor) Stop() error {
-	if err := te.hookManager.RunPreStop(te.ctx, te.task); err != nil {
-		te.logger.Error("failed to run Task hook PreStop", "error", err)
-	}
 	te.mu.RLock()
 	handle := te.handle
 	state := te.state
@@ -238,6 +235,9 @@ func (te *TaskExecutor) Stop() error {
 
 	if state != TaskStateRunning {
 		return fmt.Errorf("task is not running")
+	}
+	if err := te.hookManager.RunPreStop(te.ctx, te.task); err != nil {
+		te.logger.Error("failed to run Task hook PreStop", "error", err)
 	}
 
 	te.logger.Info("stopping task", "taskUID", te.task.UID)

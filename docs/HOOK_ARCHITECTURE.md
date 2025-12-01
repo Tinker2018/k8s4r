@@ -170,7 +170,7 @@ func (h *MyCustomHook) PreStart(ctx context.Context, subject interface{}) error 
 // 实现其他方法...
 
 // 2. 注册 Hook
-driver := NewNomadExecDriver(baseDir, logger)
+driver := NewExecDriver(baseDir, logger)
 driver.AddHook(NewMyCustomHook(logger))
 ```
 

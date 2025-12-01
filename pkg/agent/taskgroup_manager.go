@@ -10,7 +10,6 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/hashicorp/go-hclog"
 	robotv1alpha1 "github.com/hxndghxndg/k8s4r/api/v1alpha1"
-	"github.com/hxndghxndg/k8s4r/pkg/driver"
 )
 
 // TaskGroupManager 管理所有 TaskGroup 的执行
@@ -183,12 +182,9 @@ func (tgm *TaskGroupManager) createTaskGroup(ctx context.Context, taskGroup *rob
 	// 上报 TaskGroup 已分配
 	tgm.reportTaskGroupStatus(taskGroupUID, "pending", "TaskGroup assigned to robot", nil)
 
-	// 创建 Nomad 驱动实例并传入 SimpleDriverFactory
-	nomadDriver := driver.NewNomadExecDriver(tgm.workDir, tgm.logger)
-
 	taskGroupExecutorConfig := TaskGroupExecutorConfig{
 		TaskGroup:     taskGroup,
-		DriverFactory: NewSimpleDriverFactory(nomadDriver, tgm.logger),
+		DriverFactory: NewSimpleDriverFactory(tgm.logger),
 		Logger:        tgm.logger,
 		BaseDir:       tgm.workDir,
 		MQTTClient:    tgm.mqttClient,
