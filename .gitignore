@@ -37,3 +37,23 @@ tmp/
 # Kubernetes
 kubeconfig
 *.kubeconfig
+
+# ============================================
+# K8s4r 调试和开发环境产生的文件
+# ============================================
+
+# SPIRE 数据目录（包含密钥、证书、数据库等）
+.spire-data/
+.spire-bin/
+
+# Mosquitto 证书（运行时自动生成）
+config/mosquitto/certs/spire-ca.crt
+
+# 日志文件
+*.log
+
+# 测试覆盖率报告
+coverage.html
+coverage.out
+*.cover
+*.coverprofile

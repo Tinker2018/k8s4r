@@ -1,0 +1,463 @@
+// +build integration
+
+package spire
+
+import (
+	"context"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"github.com/stretchr/testify/require"
+)
+
+// TestSPIREIntegration 集成测试：测试 SVID 颁发流程
+// 需要先启动 SPIRE Server 和 Agent
+// 运行方式: go test -tags=integration -v ./pkg/plugin/spire/...
+func TestSPIREIntegration(t *testing.T) {
+	// 跳过测试，除非设置了环境变量
+	if os.Getenv("SPIRE_INTEGRATION_TEST") != "1" {
+		t.Skip("Skipping integration test. Set SPIRE_INTEGRATION_TEST=1 to run")
+	}
+
+	ctx := context.Background()
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "spire-integration-test",
+		Level: hclog.Debug,
+	})
+
+	t.Run("SVID Issuance", func(t *testing.T) {
+		testSVIDIssuance(t, ctx, logger)
+	})
+
+	t.Run("SVID Rotation", func(t *testing.T) {
+		testSVIDRotation(t, ctx, logger)
+	})
+
+	t.Run("Bundle Sync", func(t *testing.T) {
+		testBundleSync(t, ctx, logger)
+	})
+
+	t.Run("Multiple Workloads", func(t *testing.T) {
+		testMultipleWorkloads(t, ctx, logger)
+	})
+}
+
+// testSVIDIssuance 测试 SVID 颁发
+func testSVIDIssuance(t *testing.T, ctx context.Context, logger hclog.Logger) {
+	// 创建 Workload API 客户端
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+	))
+	require.NoError(t, err, "Failed to create X509Source")
+	defer source.Close()
+
+	// 等待 SVID 就绪
+	logger.Info("Waiting for SVID...")
+	time.Sleep(2 * time.Second)
+
+	// 获取 SVID
+	svid, err := source.GetX509SVID()
+	require.NoError(t, err, "Failed to get SVID")
+
+	// 验证 SVID
+	require.NotNil(t, svid, "SVID should not be nil")
+	require.NotEmpty(t, svid.Certificates, "SVID should have certificates")
+	require.NotNil(t, svid.PrivateKey, "SVID should have private key")
+
+	// 验证 SPIFFE ID
+	spiffeID := svid.ID
+	require.NotEmpty(t, spiffeID.String(), "SPIFFE ID should not be empty")
+	logger.Info("SVID obtained", "spiffeID", spiffeID.String())
+
+	// 验证证书链
+	cert := svid.Certificates[0]
+	require.NotNil(t, cert, "Certificate should not be nil")
+
+	// 验证证书有效期
+	now := time.Now()
+	require.True(t, now.After(cert.NotBefore), "Certificate should be valid (after NotBefore)")
+	require.True(t, now.Before(cert.NotAfter), "Certificate should be valid (before NotAfter)")
+	logger.Info("Certificate validity checked",
+		"notBefore", cert.NotBefore,
+		"notAfter", cert.NotAfter,
+		"ttl", cert.NotAfter.Sub(now))
+
+	// 验证证书中的 SPIFFE ID
+	require.Equal(t, 1, len(cert.URIs), "Certificate should have one URI")
+	require.Equal(t, spiffeID.URL().String(), cert.URIs[0].String(), "Certificate URI should match SPIFFE ID")
+
+	// 验证密钥对匹配
+	publicKey := cert.PublicKey
+	require.NotNil(t, publicKey, "Public key should not be nil")
+	logger.Info("SVID validation completed successfully")
+}
+
+// testSVIDRotation 测试 SVID 自动轮换
+func testSVIDRotation(t *testing.T, ctx context.Context, logger hclog.Logger) {
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+	))
+	require.NoError(t, err)
+	defer source.Close()
+
+	// 获取初始 SVID
+	svid1, err := source.GetX509SVID()
+	require.NoError(t, err)
+	logger.Info("Initial SVID obtained", "spiffeID", svid1.ID.String())
+
+	// 监听 SVID 更新
+	updateChan := make(chan struct{}, 1)
+	err = source.WatchX509Context(ctx, &x509ContextWatcher{
+		onUpdate: func() {
+			select {
+			case updateChan <- struct{}{}:
+			default:
+			}
+		},
+		logger: logger,
+	})
+	require.NoError(t, err)
+
+	// 等待 SVID 更新（或超时）
+	logger.Info("Waiting for SVID rotation...")
+	select {
+	case <-updateChan:
+		logger.Info("SVID updated!")
+		
+		// 获取新的 SVID
+		svid2, err := source.GetX509SVID()
+		require.NoError(t, err)
+		
+		// 验证 SPIFFE ID 不变
+		require.Equal(t, svid1.ID.String(), svid2.ID.String(), "SPIFFE ID should remain the same")
+		
+		// 验证证书序列号不同（新证书）
+		require.NotEqual(t, 
+			svid1.Certificates[0].SerialNumber, 
+			svid2.Certificates[0].SerialNumber, 
+			"Certificate serial number should change after rotation")
+		
+		logger.Info("SVID rotation verified",
+			"oldSerial", svid1.Certificates[0].SerialNumber,
+			"newSerial", svid2.Certificates[0].SerialNumber)
+		
+	case <-time.After(30 * time.Second):
+		t.Log("SVID rotation not triggered within timeout (this is expected if TTL is long)")
+	}
+}
+
+// testBundleSync 测试 Trust Bundle 同步
+func testBundleSync(t *testing.T, ctx context.Context, logger hclog.Logger) {
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+	))
+	require.NoError(t, err)
+	defer source.Close()
+
+	// 获取 Trust Bundle
+	trustDomain := spiffeid.RequireTrustDomainFromString("k8s4r.io")
+	bundle, err := source.GetX509BundleForTrustDomain(trustDomain)
+	require.NoError(t, err, "Failed to get trust bundle")
+
+	// 验证 Bundle
+	require.NotNil(t, bundle, "Bundle should not be nil")
+	require.Equal(t, trustDomain, bundle.TrustDomain(), "Trust domain should match")
+
+	// 获取根证书
+	certs := bundle.X509Authorities()
+	require.NotEmpty(t, certs, "Bundle should have root certificates")
+	logger.Info("Trust bundle obtained",
+		"trustDomain", trustDomain.String(),
+		"rootCerts", len(certs))
+
+	// 验证根证书
+	for i, cert := range certs {
+		require.NotNil(t, cert, "Root certificate should not be nil")
+		require.True(t, cert.IsCA, "Root certificate should be a CA")
+		logger.Info("Root certificate validated",
+			"index", i,
+			"subject", cert.Subject.CommonName,
+			"notBefore", cert.NotBefore,
+			"notAfter", cert.NotAfter)
+	}
+}
+
+// testMultipleWorkloads 测试多个工作负载（模拟多个 Task）
+func testMultipleWorkloads(t *testing.T, ctx context.Context, logger hclog.Logger) {
+	// 模拟 3 个不同的工作负载
+	workloads := []string{"task-1", "task-2", "task-3"}
+
+	for _, workloadID := range workloads {
+		t.Run(workloadID, func(t *testing.T) {
+			// 创建独立的 X509Source
+			source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+				workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+			))
+			require.NoError(t, err)
+			defer source.Close()
+
+			// 获取 SVID
+			svid, err := source.GetX509SVID()
+			require.NoError(t, err)
+
+			logger.Info("Workload SVID obtained",
+				"workload", workloadID,
+				"spiffeID", svid.ID.String())
+
+			// 验证每个工作负载都能获得有效的 SVID
+			require.NotNil(t, svid)
+			require.NotEmpty(t, svid.Certificates)
+		})
+	}
+}
+
+// x509ContextWatcher 实现 X.509 Context 监听器
+type x509ContextWatcher struct {
+	onUpdate func()
+	logger   hclog.Logger
+}
+
+func (w *x509ContextWatcher) OnX509ContextUpdate(c *workloadapi.X509Context) {
+	w.logger.Info("X.509 Context updated",
+		"svids", len(c.SVIDs),
+		"bundles", len(c.Bundles))
+	w.onUpdate()
+}
+
+func (w *x509ContextWatcher) OnX509ContextWatchError(err error) {
+	w.logger.Error("X.509 Context watch error", "error", err)
+}
+
+// TestSPIREAgentLifecycle 测试 SPIRE Agent 生命周期
+func TestSPIREAgentLifecycle(t *testing.T) {
+	if os.Getenv("SPIRE_INTEGRATION_TEST") != "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "agent-lifecycle-test",
+		Level: hclog.Debug,
+	})
+
+	// 创建临时目录
+	tmpDir, err := os.MkdirTemp("", "spire-agent-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	// 配置
+	config := &Config{
+		Enabled:       true,
+		ServerAddress: "localhost:8081",
+		TrustDomain:   "k8s4r.io",
+		SocketPath:    filepath.Join(tmpDir, "api.sock"),
+		NodeAttestor: NodeAttestor{
+			Type: "join_token",
+			JoinToken: &JoinTokenConfig{
+				Token: os.Getenv("SPIRE_JOIN_TOKEN"), // 需要从环境变量读取
+			},
+		},
+	}
+
+	// 验证配置
+	err = config.Validate()
+	require.NoError(t, err)
+
+	// 创建 AgentManager
+	mgr := NewAgentManager(logger, config)
+
+	// 启动 Agent
+	err = mgr.Start(ctx)
+	require.NoError(t, err, "Failed to start SPIRE Agent")
+	defer mgr.Stop(ctx)
+
+	// 等待 Agent 就绪
+	logger.Info("Waiting for agent to be ready...")
+	time.Sleep(5 * time.Second)
+
+	// 健康检查
+	err = mgr.HealthCheck(ctx)
+	require.NoError(t, err, "Agent health check failed")
+
+	// 验证 socket 存在
+	_, err = os.Stat(config.SocketPath)
+	require.NoError(t, err, "Agent socket should exist")
+
+	// 测试 Workload API
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr(fmt.Sprintf("unix://%s", config.SocketPath)),
+	))
+	require.NoError(t, err, "Failed to create X509Source")
+	defer source.Close()
+
+	// 获取 SVID
+	svid, err := source.GetX509SVID()
+	require.NoError(t, err, "Failed to get SVID from our agent")
+	require.NotNil(t, svid)
+	logger.Info("SVID obtained from our agent", "spiffeID", svid.ID.String())
+
+	// 停止 Agent
+	err = mgr.Stop(ctx)
+	require.NoError(t, err, "Failed to stop agent")
+
+	// 验证 socket 已清理
+	_, err = os.Stat(config.SocketPath)
+	require.True(t, os.IsNotExist(err), "Agent socket should be removed after stop")
+}
+
+// TestKeyringIntegration 测试 Linux Keyring 集成
+func TestKeyringIntegration(t *testing.T) {
+	if os.Getenv("SPIRE_INTEGRATION_TEST") != "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	if os.Geteuid() != 0 {
+		t.Skip("Keyring test requires root privileges")
+	}
+
+	ctx := context.Background()
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "keyring-test",
+		Level: hclog.Debug,
+	})
+
+	// 创建 KeyringManager
+	config := &KeyringConfig{
+		Enabled:     true,
+		KeyringType: "session",
+		Description: "test-spire-keys",
+		Permissions: 0x3f3f0000, // rw-rw----
+	}
+
+	mgr := NewKeyringManager(logger, config)
+
+	// 获取 SVID 用于测试
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+	))
+	require.NoError(t, err)
+	defer source.Close()
+
+	svid, err := source.GetX509SVID()
+	require.NoError(t, err)
+
+	// 提取私钥
+	privateKeyPEM, err := x509.MarshalPKCS8PrivateKey(svid.PrivateKey)
+	require.NoError(t, err)
+	privateKeyBlock := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privateKeyPEM,
+	}
+	privateKeyData := pem.EncodeToMemory(privateKeyBlock)
+
+	// 提取证书
+	certData := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: svid.Certificates[0].Raw,
+	})
+
+	// 存储到 Keyring
+	keyName := fmt.Sprintf("spire-test-%d", time.Now().Unix())
+	keyID, err := mgr.StoreKey(ctx, keyName, privateKeyData)
+	require.NoError(t, err, "Failed to store key in keyring")
+	require.NotZero(t, keyID, "Key ID should not be zero")
+	logger.Info("Key stored in keyring", "keyID", keyID, "keyName", keyName)
+
+	// 读取密钥
+	retrievedKey, err := mgr.ReadKey(ctx, keyID)
+	require.NoError(t, err, "Failed to read key from keyring")
+	require.Equal(t, privateKeyData, retrievedKey, "Retrieved key should match stored key")
+	logger.Info("Key retrieved from keyring successfully")
+
+	// 搜索密钥
+	searchedKeyID, err := mgr.SearchKey(ctx, keyName)
+	require.NoError(t, err, "Failed to search key")
+	require.Equal(t, keyID, searchedKeyID, "Searched key ID should match")
+	logger.Info("Key found by name", "keyName", keyName)
+
+	// 存储证书
+	certName := fmt.Sprintf("spire-cert-%d", time.Now().Unix())
+	certID, err := mgr.StoreKey(ctx, certName, certData)
+	require.NoError(t, err, "Failed to store certificate")
+	logger.Info("Certificate stored", "certID", certID)
+
+	// 撤销密钥
+	err = mgr.RevokeKey(ctx, keyID)
+	require.NoError(t, err, "Failed to revoke key")
+	logger.Info("Key revoked", "keyID", keyID)
+
+	// 验证密钥已被撤销
+	_, err = mgr.ReadKey(ctx, keyID)
+	require.Error(t, err, "Should not be able to read revoked key")
+
+	// 清理证书
+	err = mgr.RevokeKey(ctx, certID)
+	require.NoError(t, err, "Failed to revoke certificate")
+}
+
+// Benchmark 性能测试
+func BenchmarkSVIDFetch(b *testing.B) {
+	if os.Getenv("SPIRE_INTEGRATION_TEST") != "1" {
+		b.Skip("Skipping benchmark")
+	}
+
+	ctx := context.Background()
+	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+		workloadapi.WithAddr("unix:///tmp/spire-agent/api.sock"),
+	))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer source.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := source.GetX509SVID()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkKeyringStore(b *testing.B) {
+	if os.Getenv("SPIRE_INTEGRATION_TEST") != "1" {
+		b.Skip("Skipping benchmark")
+	}
+
+	if os.Geteuid() != 0 {
+		b.Skip("Requires root")
+	}
+
+	ctx := context.Background()
+	logger := hclog.NewNullLogger()
+	config := &KeyringConfig{
+		Enabled:     true,
+		KeyringType: "session",
+		Description: "bench-keys",
+	}
+	mgr := NewKeyringManager(logger, config)
+
+	testData := []byte("test key data for benchmark")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		keyName := fmt.Sprintf("bench-key-%d", i)
+		keyID, err := mgr.StoreKey(ctx, keyName, testData)
+		if err != nil {
+			b.Fatal(err)
+		}
+		// 清理
+		mgr.RevokeKey(ctx, keyID)
+	}
+}

@@ -1,0 +1,37 @@
+# K8s4R Agent 插件配置
+
+# SPIRE 插件配置
+spire:
+  # Workload API Socket 路径（spire-agent 启动后会创建）
+  socketPath: "/tmp/spire-agent/agent.sock"
+  
+  # SPIFFE 信任域
+  trustDomain: "k8s4r.example.org"
+  
+  # SPIRE Server 地址
+  serverAddr: "localhost:8081"
+  
+  # Join Token（从环境变量读取，由启动脚本设置）
+  # 启动脚本会自动生成 token 并设置 SPIRE_JOIN_TOKEN 环境变量
+  joinToken: "${SPIRE_JOIN_TOKEN}"
+  
+  # SPIRE Agent 数据目录
+  dataDir: "./.spire-data/agent"
+  
+  # 日志级别
+  logLevel: "DEBUG"
+  
+  # 二进制配置（支持自动下载安装）
+  binary:
+    # 自动安装配置
+    installation:
+      enabled: true
+      version: "1.9.0"
+      downloadUrl: "http://10.30.16.166/spire-1.9.0-linux-amd64-musl.tar.gz"
+      installDir: ".spire-bin"
+      binaryName: "spire-agent"
+      extractArchive: true
+      stripComponents: 2
+  
+  # Linux Keyring 配置
+  useKeyring: false

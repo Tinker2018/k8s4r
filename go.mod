@@ -8,6 +8,9 @@ require (
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad v1.11.0
 	github.com/shirou/gopsutil/v3 v3.24.5
+	github.com/spiffe/go-spiffe/v2 v2.5.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/sys v0.37.0
 	google.golang.org/grpc v1.76.0
 	google.golang.org/protobuf v1.36.10
 	k8s.io/api v0.34.0
@@ -202,7 +205,6 @@ require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/cast v1.7.0 // indirect
 	github.com/spf13/pflag v1.0.7 // indirect
-	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
@@ -234,7 +236,6 @@ require (
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/oauth2 v0.32.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
@@ -248,6 +249,7 @@ require (
 	gopkg.in/fsnotify.v1 v1.4.7 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.34.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect

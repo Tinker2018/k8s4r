@@ -66,3 +66,128 @@ docker-build:
 deps:
 	go mod tidy
 	go mod download
+
+# ============================================
+# 开发环境管理 (SPIRE + Mosquitto)
+# ============================================
+
+.PHONY: dev-start dev-stop dev-clean dev-logs dev-status
+
+# 启动完整开发环境 (SPIRE + Mosquitto + Server + Agent)
+dev-start:
+	@./scripts/manage-dev-env.sh start
+
+# 修复 AppArmor 权限问题（针对 snap 安装的 Go）
+fix-apparmor:
+	@echo "Fixing AppArmor for snap applications..."
+	@sudo systemctl start apparmor || true
+	@sudo apparmor_parser -r /var/lib/snapd/apparmor/profiles/* 2>/dev/null || true
+	@echo "AppArmor profiles reloaded"
+
+# 使用 go run 启动开发环境（无需预先编译，如遇 AppArmor 问题先运行 make fix-apparmor）
+dev-start-gorun: fix-apparmor
+	@USE_GO_RUN=1 ./scripts/manage-dev-env.sh start
+
+# 停止所有开发环境组件
+dev-stop:
+	@./scripts/manage-dev-env.sh stop
+
+# 重启开发环境
+dev-restart:
+	@./scripts/manage-dev-env.sh restart
+
+# 清理开发环境 (停止 + 清理数据)
+dev-clean:
+	@./scripts/manage-dev-env.sh clean
+
+# 查看开发环境日志
+dev-logs:
+	@./scripts/manage-dev-env.sh logs
+
+# 查看开发环境状态
+dev-status:
+	@./scripts/manage-dev-env.sh status
+
+# 仅启动 Mosquitto
+dev-mqtt:
+	@echo "Starting Mosquitto..."
+	@docker run -d --name mosquitto \
+		--network host \
+		-v $$(pwd)/config/mosquitto/mosquitto-hybrid.conf:/mosquitto/config/mosquitto.conf \
+		-v $$(pwd)/config/mosquitto/certs:/mosquitto/certs \
+		eclipse-mosquitto:2.0
+	@echo "✅ Mosquitto started"
+	@echo "   Plain: tcp://localhost:1883"
+	@echo "   mTLS: ssl://localhost:8883"
+
+# 测试 SPIRE API
+dev-test-spire:
+	@echo "Testing Mock SPIRE Server..."
+	@echo ""
+	@echo "1. Health Check:"
+	@curl -s http://localhost:8090/health && echo "" || echo "❌ Failed"
+	@echo ""
+	@echo "2. List Identities:"
+	@curl -s http://localhost:8090/api/list-identities | jq '.' || echo "❌ Failed"
+	@echo ""
+	@echo "3. CA Bundle:"
+	@curl -s http://localhost:8090/api/ca-bundle | head -5
+
+# 注册新的机器人身份
+dev-register-robot:
+	@read -p "Enter robot ID (e.g., robot-002): " robot_id; \
+	spiffe_id="spiffe://k8s4r.example.org/agent/$$robot_id"; \
+	echo "Registering: $$spiffe_id"; \
+	curl -X POST http://localhost:8090/api/register-workload \
+		-H "Content-Type: application/json" \
+		-d "{\"spiffe_id\": \"$$spiffe_id\"}" | jq '.'
+
+# ============================================
+# SPIRE 集成测试
+# ============================================
+
+.PHONY: test-spire verify-spire
+
+# 验证 SPIRE 集成的三点要求
+verify-spire:
+	@./scripts/verify-requirements.sh
+
+# 运行 SPIRE 单元测试
+test-spire:
+	@echo "Running SPIRE unit tests..."
+	@go test -v ./pkg/plugin/spire
+
+# ============================================
+# 帮助信息
+# ============================================
+
+.PHONY: help
+
+help:
+	@echo "K8s4r Makefile Commands"
+	@echo "======================="
+	@echo ""
+	@echo "Build:"
+	@echo "  make build              - Build all binaries"
+	@echo "  make clean              - Clean build artifacts"
+	@echo ""
+	@echo "Development Environment:"
+	@echo "  make dev-start          - Start full dev environment (SPIRE + MQTT + Server + Agent)"
+	@echo "  make dev-start-gorun    - Start with 'go run' (auto-fix AppArmor if needed)"
+	@echo "  make fix-apparmor       - Fix AppArmor permissions for snap Go"
+	@echo "  make dev-stop           - Stop all components"
+	@echo "  make dev-restart        - Restart all components"
+	@echo "  make dev-status         - Show component status"
+	@echo "  make dev-logs           - Show recent logs"
+	@echo "  make dev-clean          - Stop and clean all data"
+	@echo ""
+	@echo "Individual Components:"
+	@echo "  make dev-mqtt           - Start only Mosquitto"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test               - Run all tests"
+	@echo "  make verify-spire       - Verify SPIRE integration requirements"
+	@echo "  make test-spire         - Run SPIRE unit tests"
+	@echo ""
+	@echo "Direct Script Usage:"
+	@echo "  ./scripts/manage-dev-env.sh start|stop|restart|status|logs|clean"
