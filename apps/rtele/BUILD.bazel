@@ -1,0 +1,4 @@
+# Root BUILD file for rtele
+# This file can be empty or contain workspace-level targets
+# Actual build targets are defined in subdirectories
+

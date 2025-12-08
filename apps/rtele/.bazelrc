@@ -1,0 +1,31 @@
+# Bazel configuration for RTele
+
+# C++ standard
+build --cxxopt=-std=c++17
+
+# Optimization
+build:opt --compilation_mode=opt
+build:opt --copt=-O3
+
+# Debug
+build:dbg --compilation_mode=dbg
+build:dbg --copt=-g
+
+# Enable bzlmod
+common --enable_bzlmod
+
+# Output
+build --show_timestamps
+build --color=yes
+
+# Platform configurations
+# For ARM64/aarch64
+build:arm64 --platforms=@platforms//cpu:aarch64
+build:arm64 --cpu=aarch64
+
+# For x86_64
+build:x86_64 --platforms=@platforms//cpu:x86_64
+build:x86_64 --cpu=k8
+
+# Default to optimized builds
+build --config=opt

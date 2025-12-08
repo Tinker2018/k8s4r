@@ -1,0 +1,12 @@
+"""RTele - Remote Teleoperation Application"""
+
+module(
+    name = "rtele",
+    version = "0.1.0",
+)
+
+# Bazel dependencies
+bazel_dep(name = "rules_cc", version = "0.0.9")
+bazel_dep(name = "abseil-cpp", version = "20240116.2", repo_name = "com_google_absl")
+bazel_dep(name = "spdlog", version = "1.16.0.bcr.2")
+bazel_dep(name = "opencv", version = "4.12.0")

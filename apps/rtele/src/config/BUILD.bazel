@@ -1,0 +1,14 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# RTC 配置管理
+cc_library(
+    name = "config",
+    srcs = ["rtc_config.cc"],
+    hdrs = ["rtc_config.h"],
+    visibility = ["//src:__subpackages__"],
+    deps = [
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@spdlog",
+    ],
+)

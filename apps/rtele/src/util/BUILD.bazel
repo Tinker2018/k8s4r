@@ -1,0 +1,21 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Token 生成器
+cc_library(
+    name = "token_generator",
+    srcs = ["token_generator.cc"],
+    hdrs = ["token_generator.h"],
+    visibility = ["//src:__subpackages__"],
+    linkopts = ["-lcrypto"],
+)
+
+# 视频文件读取器
+cc_library(
+    name = "video_file_reader",
+    srcs = ["video_file_reader.cc"],
+    hdrs = ["video_file_reader.h"],
+    visibility = ["//src:__subpackages__"],
+    deps = [
+        "@com_google_absl//absl/strings",
+    ],
+)
