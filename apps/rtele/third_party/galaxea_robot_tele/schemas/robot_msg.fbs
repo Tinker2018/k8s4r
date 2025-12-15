@@ -1,0 +1,135 @@
+namespace robot_msg_fbs;
+
+enum RobotMsgType: uint16 {
+    UNKNOWN = 0,
+    FEEDBACK_ARM_LEFT = 1,
+    FEEDBACK_ARM_RIGHT = 2,
+    FEEDBACK_GRIPPER_LEFT = 3,
+    FEEDBACK_GRIPPER_RIGHT = 4,
+    POSE_EE_LEFT_ARM = 5,
+    POSE_EE_RIGHT_ARM = 6,
+    TARGET_POSE_ARM_LEFT = 7,
+    TARGET_POSE_ARM_RIGHT = 8,
+    TARGET_JOINT_STATE_ARM_LEFT = 9,
+    TARGET_JOINT_STATE_ARM_RIGHT = 10,
+    TARGET_POSITION_GRIPPER_LEFT = 11,
+    TARGET_POSITION_GRIPPER_RIGHT = 12,
+    TARGET_SPEED_CHASSIS = 13,
+    TARGET_SPEED_TORSO = 14,
+    CONTROL_ARM_LEFT = 15,
+    CONTROL_ARM_RIGHT = 16
+}
+
+// 修改：增加了 Trigger 相关的服务类型
+enum ServiceType : uint8 {
+    UNKNOWN_SRV = 0,
+    REQ_TELEOP_FRAME = 1,
+    RESP_TELEOP_FRAME = 2,
+    REQ_START_DATA = 3,  // Start Data 请求
+    RESP_START_DATA = 4, // Start Data 响应
+    REQ_STOP_DATA = 5,   // Stop Data 请求
+    RESP_STOP_DATA = 6   // Stop Data 响应
+}
+
+table Header {
+    stamp_sec: int32;
+    stamp_nanosec: uint32;
+    frame_id: string;
+}
+
+table MotorControl {
+    msg_type: RobotMsgType = UNKNOWN;
+    header: Header;
+    name: string;
+    p_des: [float];
+    v_des: [float];
+    kp: [float];
+    kd: [float];
+    t_ff: [float];
+    mode: uint8;
+}
+
+table Twist {
+    linear_x: float;
+    linear_y: float;
+    linear_z: float;
+    angular_x: float;
+    angular_y: float;
+    angular_z: float;
+}
+
+table TwistStamped {
+    msg_type: RobotMsgType = UNKNOWN;
+    header: Header;
+    twist: Twist;
+}
+
+table Pose {
+    x: float;
+    y: float;
+    z: float;
+    qx: float;
+    qy: float;
+    qz: float;
+    qw: float;
+}
+
+table PoseStamped {
+    msg_type: RobotMsgType = UNKNOWN;
+    header: Header;
+    pose: Pose;
+}
+
+table JointState {
+    msg_type: RobotMsgType = UNKNOWN;
+    header: Header;
+    names: [string];
+    positions: [float];
+    velocities: [float];
+    efforts: [float];
+}
+
+// --- 服务部分 ---
+
+table TeleopFrameRequest {
+    action: uint8;
+}
+
+table TeleopFrameResponse {
+    success: bool;
+    message: string;
+}
+
+// 新增：Trigger (用于Start/Stop Data)
+table TriggerRequest {
+    dummy: uint8; // 占位
+}
+
+table TriggerResponse {
+    success: bool;
+    message: string;
+}
+
+table ServiceData {
+    req_id: uint64;
+    type: ServiceType;
+    teleop_req: TeleopFrameRequest;
+    teleop_resp: TeleopFrameResponse;
+    // 新增字段
+    trigger_req: TriggerRequest;
+    trigger_resp: TriggerResponse;
+}
+
+union AnyMsg {
+    JointState,
+    PoseStamped,
+    TwistStamped,
+    MotorControl,
+    ServiceData
+}
+
+table CommWrapper {
+    msg: AnyMsg;
+}
+
+root_type CommWrapper;

@@ -3,30 +3,37 @@
 ## 设计
 基于火山云veRTC设计，实现机器人远程遥控功能。
 
-## 构建
+## 构建方式
 
-本项目使用 Bazel 和 Bzlmod 进行构建。
+本项目支持两种构建方式：
+1. **独立CMake构建** - 适合开发和测试
+2. **ROS2 colcon构建** - 适合与ROS2包集成使用
+
+---
+
+## 方式1：独立CMake构建
 
 ### 前置要求
 
-- Bazel 7.0.0+
-- C++17 编译器
-- VolcEngineRTC SDK (Linux x86_64)
+- CMake 3.16+
+- C++17 编译器 (GCC 7+ 或 Clang 5+)
+- Git
+- VolcEngineRTC SDK (Linux x86_64 或 ARM64)
 
 ### 构建步骤
 
 ```bash
-# 在 x86_64 平台构建
-bazel build --config=x86_64 //src:rtele
+# 创建构建目录
+mkdir build && cd build
 
-# 在 ARM64/aarch64 平台构建
-bazel build --config=arm64 //src:rtele
+# 配置 CMake
+cmake ..
 
-# 或者让 Bazel 自动检测平台（使用默认配置）
-bazel build //src:rtele
+# 编译（使用多核加速）
+cmake --build . -j$(nproc)
 
 # 运行程序
-bazel run //src:rtele -- \
+./bin/rtele \
   --room_id=room001 \
   --user_id=user001 \
   --app_id=your_app_id \
@@ -34,36 +41,118 @@ bazel run //src:rtele -- \
   --enable_publish_video=true
 ```
 
-### 平台支持
+### 第三方依赖
+
+以下依赖库将在首次编译时自动下载并从源码编译：
+- **Abseil C++** (20240116.2) - Google 的 C++ 基础库
+- **fmt** (10.2.1) - 格式化库
+- **spdlog** (v1.12.0) - 快速的 C++ 日志库
+- **OpenCV** (4.8.1) - 计算机视觉库（仅编译 core, imgcodecs, imgproc 模块）
+
+注意：首次编译会下载并编译这些依赖库，可能需要较长时间（10-30分钟）。后续编译会使用缓存，速度会快很多。
+
+### 编译选项
+
+```bash
+# Debug 模式编译
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+
+# Release 模式编译（默认）
+cmake .. -DCMAKE_BUILD_TYPE=Release
+
+# ARM64 平台
+cmake .. -DUSE_ARM64=ON
+
+# 清理并重新编译
+rm -rf build && mkdir build && cd build && cmake .. && cmake --build . -j$(nproc)
+```
+
+---
+
+## 方式2：ROS2 colcon构建
+
+### 前置要求
+
+- ROS2 (Humble/Iron/Rolling)
+- 所有方式1中的依赖
+
+### 工作空间设置
+
+```bash
+# 0. Source ROS2环境（重要！）
+# 如果遇到错误，尝试在新终端中执行，或先unset所有ROS相关变量
+# 如果用的是zsh就source对应的zsh文件
+source /opt/ros/humble/setup.bash   # 或你的ROS2版本：iron, rolling等
+
+# 验证ROS2环境已加载
+echo $ROS_DISTRO  # 应该输出：humble
+
+# 1. 创建ROS2工作空间
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+
+# 2. 链接rtele包
+ln -s /path/to/rtele ./rtele
+
+# 3. 链接third_party中的ROS2包（消息定义等）
+ln -s /path/to/rtele/third_party/hdas_msg ./hdas_msg
+ln -s /path/to/rtele/third_party/system_manager_msg ./system_manager_msg
+ln -s /path/to/rtele/third_party/teleoperation_msg_ros2 ./teleoperation_msg_ros2
+ln -s /path/to/rtele/third_party/galaxea_robot_tele ./galaxea_robot_tele
+
+# 4. 编译
+cd ~/ros2_ws
+colcon build
+
+# 5. Source环境
+source install/setup.bash
+
+# 6. 运行
+ros2 run rtele rtele \
+  --room_id=room001 \
+  --user_id=user001 \
+  --app_id=your_app_id \
+  --app_key=your_app_key
+```
+
+### 只编译rtele及其依赖
+
+```bash
+cd ~/ros2_ws
+colcon build --packages-up-to rtele
+```
+
+### 常见问题
+
+**Q: 编译时提示找不到ament_cmake**
+```bash
+# 确保已经source ROS2环境
+source /opt/ros/humble/setup.bash  # 根据你的ROS2版本调整
+```
+
+**Q: 每次打开终端都要source吗？**
+```bash
+# 可以添加到~/.bashrc或~/.zshrc自动加载
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+```
+
+### ROS2集成说明
+
+当使用colcon构建时，rtele会：
+- 自动启用ROS2支持（定义`USE_ROS2`宏）
+- 使用FetchContent编译第三方依赖（Abseil、spdlog、OpenCV等）
+- 链接ROS2消息包（hdas_msg、system_manager_msg等）
+- 可以在代码中使用`#ifdef USE_ROS2`条件编译ROS2相关功能
+
+---
+
+## 平台支持
 
 项目支持以下平台：
 - **x86_64**: 使用 VolcEngineRTC_Linux_x86_64
 - **aarch64 (ARM64)**: 使用 VolcEngineRTC_Linux_3.58.1.500_aarch64
 
-Bazel 会根据 `--config` 参数自动选择对应的 SDK：
-```bash
-# 显式指定 x86_64 平台
-bazel build --config=x86_64 //src:rtele
-
-# 显式指定 ARM64 平台
-bazel build --config=arm64 //src:rtele
-```
-
-### 开发构建
-
-```bash
-# Debug 模式
-bazel build --config=dbg //src:rtele
-
-# Optimized 模式
-bazel build --config=opt //src:rtele
-
-# 构建所有目标
-bazel build //...
-
-# 查看构建结构指南
-cat BUILD_GUIDE.md
-```
+CMake 会自动检测系统架构并选择对应的 SDK。
 
 ## 使用方法
 
